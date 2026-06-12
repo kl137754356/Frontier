@@ -1,6 +1,13 @@
+// ============================================================
+// Frontier - 初始化模块
+// 文件位置：rust/crates/rusty-claude-cli/src/init.rs
+// 功能：仓库初始化，创建 CLAUDE.md 和配置文件
+// ============================================================
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// 初始化的默认 .claw.json 配置
 const STARTER_CLAW_JSON: &str = concat!(
     "{\n",
     "  \"permissions\": {\n",
@@ -8,29 +15,34 @@ const STARTER_CLAW_JSON: &str = concat!(
     "  }\n",
     "}\n",
 );
-const GITIGNORE_COMMENT: &str = "# Claw Code local artifacts";
+
+/// .gitignore 注释
+const GITIGNORE_COMMENT: &str = "# Frontier local artifacts";
+
+/// .gitignore 条目 - 需要忽略的本地文件
 const GITIGNORE_ENTRIES: [&str; 3] = [".claw/settings.local.json", ".claw/sessions/", ".clawhip/"];
 
+/// 初始化状态 - 表示初始化操作的结果
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InitStatus {
-    Created,
-    Updated,
-    Skipped,
+    Created,   // 新创建
+    Updated,   // 已更新
+    Skipped,   // 跳过（已存在）
 }
 
 impl InitStatus {
+    /// 获取人类可读的标签
     #[must_use]
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::Created => "created",
-            Self::Updated => "updated",
-            Self::Skipped => "skipped (already exists)",
+            Self::Created => "created",                      // 已创建
+            Self::Updated => "updated",                      // 已更新
+            Self::Skipped => "skipped (already exists)",     // 已存在，跳过
         }
     }
 
-    /// Machine-stable identifier for structured output (#142).
-    /// Unlike `label()`, this never changes wording: claws can switch on
-    /// these values without brittle substring matching.
+    /// 机器可读的标识符，用于结构化输出（#142）
+    /// 与 label() 不同，这个不会改变措辞
     #[must_use]
     pub(crate) fn json_tag(self) -> &'static str {
         match self {
@@ -41,19 +53,22 @@ impl InitStatus {
     }
 }
 
+/// 初始化产物 - 表示一个被创建或更新的文件
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InitArtifact {
-    pub(crate) name: &'static str,
-    pub(crate) status: InitStatus,
+    pub(crate) name: &'static str,   // 产物名称
+    pub(crate) status: InitStatus,   // 初始化状态
 }
 
+/// 初始化报告 - 包含所有初始化产物的报告
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InitReport {
-    pub(crate) project_root: PathBuf,
-    pub(crate) artifacts: Vec<InitArtifact>,
+    pub(crate) project_root: PathBuf,   // 项目根目录
+    pub(crate) artifacts: Vec<InitArtifact>,  // 初始化产物列表
 }
 
 impl InitReport {
+    /// 渲染人类可读的初始化报告
     #[must_use]
     pub(crate) fn render(&self) -> String {
         let mut lines = vec![
@@ -71,12 +86,10 @@ impl InitReport {
         lines.join("\n")
     }
 
-    /// Summary constant that claws can embed in JSON output without having
-    /// to read it out of the human-formatted `message` string (#142).
+    /// 摘要常量 - 可嵌入 JSON 输出中（#142）
     pub(crate) const NEXT_STEP: &'static str = "Review and tailor the generated guidance";
 
-    /// Artifact names that ended in the given status. Used to build the
-    /// structured `created[]`/`updated[]`/`skipped[]` arrays for #142.
+    /// 获取指定状态的产物名称 - 用于构建结构化输出（#142）
     #[must_use]
     pub(crate) fn artifacts_with_status(&self, status: InitStatus) -> Vec<String> {
         self.artifacts
@@ -206,7 +219,7 @@ pub(crate) fn render_init_claude_md(cwd: &Path) -> String {
     let mut lines = vec![
         "# CLAUDE.md".to_string(),
         String::new(),
-        "This file provides guidance to Claw Code (clawcode.dev) when working with code in this repository.".to_string(),
+        "This file provides guidance to Frontier when working with code in this repository.".to_string(),
         String::new(),
     ];
 

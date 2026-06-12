@@ -1,0 +1,32 @@
+{
+  "aliases": {
+    "quick": "haiku"
+  },
+  "mcpServers": {
+    "sequential-thinking": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ]
+    },
+    "filesystem": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "D:\\AI_LLM\\LLM\\claw-code\\claw-code_network"
+      ]
+    },
+    "web-search": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@anthropic-ai/claude-code-addon-web-search"
+      ]
+    }
+  }
+}

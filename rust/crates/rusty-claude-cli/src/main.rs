@@ -1,3 +1,8 @@
+// ============================================================
+// Frontier - Rust 实现的 AI 编程助手 CLI
+// 主入口文件：rust/crates/rusty-claude-cli/src/main.rs
+// ============================================================
+
 #![allow(
     dead_code,
     unused_imports,
@@ -6,23 +11,27 @@
     clippy::unnecessary_wraps,
     clippy::unused_self
 )]
-mod init;
-mod input;
-mod render;
 
-use std::collections::BTreeSet;
-use std::env;
-use std::fs;
-use std::io::{self, IsTerminal, Read, Write};
-use std::net::TcpListener;
-use std::ops::{Deref, DerefMut};
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+// 子模块声明
+mod init;           // 初始化模块
+mod input;          // 输入处理模块
+mod render;         // 渲染模块（Markdown、终端输出）
 
+// 标准库导入
+use std::collections::BTreeSet;      // 有序集合
+use std::env;                         // 环境变量
+use std::fs;                          // 文件系统操作
+use std::io::{self, IsTerminal, Read, Write};  // IO 操作
+use std::net::TcpListener;            // TCP 监听（用于 MCP 服务）
+use std::ops::{Deref, DerefMut};     // 解引用操作
+use std::path::{Path, PathBuf};      // 路径处理
+use std::process::Command;            // 进程命令执行
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};  // 多线程通信
+use std::sync::{Arc, Mutex};         // 原子引用计数和互斥锁
+use std::thread::{self, JoinHandle}; // 线程管理
+use std::time::{Duration, Instant, UNIX_EPOCH};  // 时间处理
+
+// API 模块 - Anthropic/OpenAI 客户端
 use api::{
     detect_provider_kind, model_family_identity_for, resolve_startup_auth_source, AnthropicClient,
     AuthSource, ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest,
@@ -31,6 +40,7 @@ use api::{
     ToolResultContentBlock,
 };
 
+// Commands 模块 - 斜杠命令
 use commands::{
     classify_skills_slash_command, handle_agents_slash_command, handle_agents_slash_command_json,
     handle_mcp_slash_command, handle_mcp_slash_command_json, handle_plugins_slash_command,
@@ -39,10 +49,20 @@ use commands::{
     slash_command_specs, validate_slash_command_input, PluginsCommandResult, SkillSlashDispatch,
     SlashCommand,
 };
+
+// Compat Harness - 兼容性测试工具
 use compat_harness::{extract_manifest, UpstreamPaths};
+
+// Init 模块 - 仓库初始化
 use init::initialize_repo;
+
+// Plugins 模块 - 插件管理
 use plugins::{PluginHooks, PluginManager, PluginManagerConfig, PluginRegistry};
+
+// Render 模块 - 终端渲染
 use render::{MarkdownStreamState, Spinner, TerminalRenderer};
+
+// Runtime 模块 - 核心运行时
 use runtime::{
     check_base_commit, format_stale_base_warning, format_usd, load_oauth_credentials,
     load_system_prompt, pricing_for_model, resolve_expected_base, resolve_sandbox_status,
@@ -52,28 +72,35 @@ use runtime::{
     PermissionPolicy, ProjectContext, PromptCacheEvent, ResolvedPermissionMode, RuntimeError,
     Session, TokenUsage, ToolError, ToolExecutor, UsageTracker,
 };
+
+// Serde - JSON 序列化
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
+
+// Tools 模块 - 工具执行
 use tools::{
     execute_tool, mvp_tool_specs, GlobalToolRegistry, RuntimeToolDefinition, ToolSearchOutput,
 };
 
+// ============================================================
+// 常量定义
+// ============================================================
+
+/// 默认模型：claude-opus-4-6
 const DEFAULT_MODEL: &str = "claude-opus-4-6";
 
-/// #148: Model provenance for `claw status` JSON/text output. Records where
-/// the resolved model string came from so claws don't have to re-read argv
-/// to audit whether their `--model` flag was honored vs falling back to env
-/// or config or default.
+/// #148: 模型来源追踪 - 记录模型字符串的来源
+/// 用于 `claw status` 的 JSON/文本输出，方便下游工具判断
+/// 模型是来自 --model 参数、环境变量、配置文件还是默认值
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ModelSource {
-    /// Explicit `--model` / `--model=` CLI flag.
+    /// 来自显式的 --model / --model= CLI 参数
     Flag,
-    /// ANTHROPIC_MODEL environment variable (when no flag was passed).
+    /// 来自 ANTHROPIC_MODEL 环境变量（未传递 --model 参数时）
     Env,
-    /// `model` key in `.claw.json` / `.claw/settings.json` (when neither
-    /// flag nor env set it).
+    /// 来自 `.claw.json` / `.claw/settings.json` 的 model 配置项
     Config,
-    /// Compiled-in DEFAULT_MODEL fallback.
+    /// 编译时默认模型（DEFAULT_MODEL）
     Default,
 }
 
@@ -390,6 +417,9 @@ fn plugin_load_failure_json(failure: &plugins::PluginLoadFailure) -> Value {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
     match parse_args(&args)? {
+        CliAction::Serve { port, model, permission_mode } => {
+            run_tcp_serve(port, &model, permission_mode)?;
+        }
         CliAction::DumpManifests {
             output_format,
             manifests_dir,
@@ -530,6 +560,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CliAction {
+    /// TCP 服务器模式：监听端口，接收 JSON 消息，流式返回回复
+    Serve {
+        port: u16,
+        model: String,
+        permission_mode: PermissionMode,
+    },
     DumpManifests {
         output_format: CliOutputFormat,
         manifests_dir: Option<PathBuf>,
@@ -797,8 +833,30 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 allow_broad_cwd = true;
                 index += 1;
             }
+            "--serve" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "missing port for --serve".to_string())?;
+                let port: u16 = value.parse().map_err(|_| format!("invalid port: {value}"))?;
+                let permission_mode = permission_mode_override.unwrap_or(PermissionMode::DangerFullAccess);
+                return Ok(CliAction::Serve {
+                    port,
+                    model: resolve_model_alias_with_config(&model),
+                    permission_mode,
+                });
+            }
+            flag if flag.starts_with("--serve=") => {
+                let value = &flag[8..];
+                let port: u16 = value.parse().map_err(|_| format!("invalid port: {value}"))?;
+                let permission_mode = permission_mode_override.unwrap_or(PermissionMode::DangerFullAccess);
+                return Ok(CliAction::Serve {
+                    port,
+                    model: resolve_model_alias_with_config(&model),
+                    permission_mode,
+                });
+            }
             "-p" => {
-                // Claw Code compat: -p "prompt" = one-shot prompt
+                // Frontier compat: -p "prompt" = one-shot prompt
                 let prompt = args[index + 1..].join(" ");
                 if prompt.trim().is_empty() {
                     return Err("-p requires a prompt string".to_string());
@@ -817,7 +875,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 });
             }
             "--print" => {
-                // Claw Code compat: --print makes output non-interactive
+                // Frontier compat: --print makes output non-interactive
                 output_format = CliOutputFormat::Text;
                 index += 1;
             }
@@ -1374,7 +1432,7 @@ fn format_unknown_slash_command(name: &str) -> String {
 fn omc_compatibility_note_for_unknown_slash_command(name: &str) -> Option<&'static str> {
     name.starts_with("oh-my-claudecode:")
         .then_some(
-            "Compatibility note: `/oh-my-claudecode:*` is a Claude Code/OMC plugin command. `claw` does not yet load plugin slash commands, Claude statusline stdin, or OMC session hooks.",
+            "Compatibility note: `/oh-my-claudecode:*` is a Frontier/OMC plugin command. `claw` does not yet load plugin slash commands, Claude statusline stdin, or OMC session hooks.",
         )
 }
 
@@ -1516,6 +1574,18 @@ fn resolve_model_alias(model: &str) -> &str {
         "sonnet" => "claude-sonnet-4-6",
         "haiku" => "claude-haiku-4-5-20251213",
         _ => model,
+    }
+}
+
+/// Strip the `anthropic/` routing prefix from a model name before sending to the API.
+/// The prefix is used internally for provider routing but should not be sent to the backend.
+/// Case-insensitive: handles both `anthropic/` and `Anthropic/`.
+fn strip_anthropic_prefix(model: &str) -> String {
+    let lower = model.to_ascii_lowercase();
+    if lower.starts_with("anthropic/") {
+        model[10..].to_string()
+    } else {
+        model.to_string()
     }
 }
 
@@ -1676,6 +1746,14 @@ fn resolve_repl_model(cli_model: String) -> String {
     }
     if let Some(config_model) = config_model_for_current_dir() {
         return resolve_model_alias_with_config(&config_model);
+    }
+    // 当使用 OpenAI 兼容提供商（如 DeepSeek 等）时，支持 OPENAI_MODEL 环境变量
+    if let Some(openai_model) = env::var("OPENAI_MODEL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return resolve_model_alias_with_config(&openai_model);
     }
     cli_model
 }
@@ -2145,6 +2223,550 @@ fn run_worker_state(output_format: CliOutputFormat) -> Result<(), Box<dyn std::e
             println!("{raw}");
         }
     }
+    Ok(())
+}
+
+// ============================================================
+// TCP 服务器模式：为 Python 聊天窗口提供 REPL 交互
+// 协议：每行一个 JSON 对象，换行分隔
+// 请求: {"type":"prompt","text":"你好"}
+// 响应: {"type":"chunk","text":"..."} (流式)
+//       {"type":"done"} (完成)
+//       {"type":"error","text":"..."} (错误)
+// ============================================================
+fn run_tcp_serve(port: u16, model: &str, permission_mode: PermissionMode) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{BufRead, BufReader, Write as IoWrite};
+    use std::net::{TcpListener, TcpStream};
+
+    eprintln!("[claw-serve] starting TCP server...");
+    eprintln!("[claw-serve] model: {model}");
+    eprintln!("[claw-serve] permission_mode: {permission_mode:?}");
+
+    let listener = TcpListener::bind(format!("127.0.0.1:{port}"))?;
+    eprintln!("[claw-serve] listening on 127.0.0.1:{port}");
+    eprintln!("[claw-serve] waiting for connections...");
+
+    for stream in listener.incoming() {
+        let stream = stream?;
+        eprintln!("[claw-serve] client connected: {:?}", stream.peer_addr());
+        if let Err(e) = handle_tcp_client(stream, model, permission_mode) {
+            eprintln!("[claw-serve] client error: {e}");
+        }
+        eprintln!("[claw-serve] client disconnected, waiting for next connection...");
+    }
+    Ok(())
+}
+
+/// TCP 客户端会话 - 维护单个连接的会话状态
+struct TcpClientSession {
+    cli: LiveCli,
+    peer: std::net::SocketAddr,
+    /// Cached MCP state to avoid restarting MCP servers on each prompt
+    cached_mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
+    /// Cached MCP tool definitions (discovered on first prompt)
+    cached_mcp_tools: Vec<RuntimeToolDefinition>,
+}
+
+impl TcpClientSession {
+    fn new(cli: LiveCli, peer: std::net::SocketAddr) -> Self {
+        Self {
+            cli,
+            peer,
+            cached_mcp_state: None,
+            cached_mcp_tools: Vec::new(),
+        }
+    }
+
+    /// 处理 prompt 消息，SSE 流式输出到 writer
+    /// 使用逐步 API 调用 + 工具执行循环，每步实时发送 TCP 消息
+    fn handle_prompt(
+        &mut self,
+        text: &str,
+        writer: &mut std::net::TcpStream,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        eprintln!("[claw-serve] [{}] processing prompt: {}...", self.peer, &text.chars().take(80).collect::<String>());
+
+        // 尝试 bare-word skill 解析（如 "sysinfo" → 调用 sysinfo skill）
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let effective_prompt = if let Some(skill_prompt) = try_resolve_bare_skill_prompt(&cwd, text) {
+            eprintln!("[claw-serve] [{}] resolved skill invocation", self.peer);
+            skill_prompt
+        } else {
+            text.to_string()
+        };
+
+        // 使用缓存的 MCP state 避免每次重新启动 MCP servers（省 ~12 秒）
+        let t_start = std::time::Instant::now();
+
+        let plugin_state = if self.cached_mcp_state.is_some() {
+            eprintln!("[claw-serve] [{}] reusing cached MCP state", self.peer);
+            build_runtime_plugin_state_with_existing_mcp(
+                self.cached_mcp_state.clone(),
+                &self.cached_mcp_tools,
+            )?
+        } else {
+            eprintln!("[claw-serve] [{}] building plugin state (first time)", self.peer);
+            // Build MCP state separately so we can cache it
+            let cwd = std::env::current_dir()?;
+            let loader = ConfigLoader::default_for(&cwd);
+            let runtime_config = loader.load()?;
+            let (mcp_state, mcp_tools) = build_runtime_mcp_state(&runtime_config)?;
+            // Cache for reuse
+            self.cached_mcp_state = mcp_state.clone();
+            self.cached_mcp_tools = mcp_tools.clone();
+            // Build the rest of plugin state
+            let plugin_manager = build_plugin_manager(&cwd, &loader, &runtime_config);
+            let plugin_registry = plugin_manager.plugin_registry()?;
+            let plugin_hook_config = runtime_hook_config_from_plugin_hooks(plugin_registry.aggregated_hooks()?);
+            let feature_config = runtime_config
+                .feature_config()
+                .clone()
+                .with_hooks(runtime_config.hooks().merged(&plugin_hook_config));
+            let tool_registry = GlobalToolRegistry::with_plugin_tools(plugin_registry.aggregated_tools()?)?
+                .with_runtime_tools(mcp_tools)?;
+            RuntimePluginState {
+                feature_config,
+                tool_registry,
+                plugin_registry,
+                mcp_state,
+            }
+        };
+
+        let hook_abort_signal = runtime::HookAbortSignal::new();
+        let mut runtime = build_runtime_with_plugin_state(
+            self.cli.runtime.session().clone(),
+            &self.cli.session.id,
+            self.cli.model.clone(),
+            self.cli.system_prompt.clone(),
+            true,
+            false,
+            self.cli.allowed_tools.clone(),
+            self.cli.permission_mode,
+            None,
+            plugin_state,
+        )?
+        .with_hook_abort_signal(hook_abort_signal.clone());
+        let hook_abort_monitor = HookAbortMonitor::spawn(hook_abort_signal);
+
+        let t_prepare = t_start.elapsed();
+        eprintln!("[claw-serve] [{}] prepare_turn_runtime took: {:?}", self.peer, t_prepare);
+
+        // Set up real-time streaming sink so API events (thinking, text, tool_start) are sent immediately
+        let streaming_sink: Arc<Mutex<dyn std::io::Write + Send>> = Arc::new(Mutex::new(writer.try_clone()?));
+        runtime.api_client_mut().set_streaming_sink(Some(streaming_sink.clone()));
+
+        let mut permission_prompter = CliPermissionPrompter::new(self.cli.permission_mode);
+        let result = runtime.run_turn(&effective_prompt, Some(&mut permission_prompter));
+
+        // Disable streaming sink after run completes
+        runtime.api_client_mut().set_streaming_sink(None);
+
+        let t_run = t_start.elapsed();
+        eprintln!("[claw-serve] [{}] run_turn took: {:?} (total since start: {:?})", self.peer, t_run - t_prepare, t_run);
+        hook_abort_monitor.stop();
+
+        match result {
+            Ok(summary) => {
+                self.cli.replace_runtime(runtime)?;
+                self.cli.persist_session()?;
+
+                // Real-time streaming already sent: thinking, text chunks, tool_starts
+                // Only need to send tool_end results (from tool_results) which aren't streamed
+                for msg in &summary.assistant_messages {
+                    for block in &msg.blocks {
+                        if let runtime::ContentBlock::ToolUse { id, .. } = block {
+                            // Find and send corresponding tool_end
+                            for result_msg in &summary.tool_results {
+                                for result_block in &result_msg.blocks {
+                                    if let runtime::ContentBlock::ToolResult { tool_use_id, tool_name, output, is_error } = result_block {
+                                        if tool_use_id == id {
+                                            let tool_end = serde_json::json!({
+                                                "type": "tool_end",
+                                                "id": tool_use_id,
+                                                "name": tool_name,
+                                                "output": output,
+                                                "is_error": is_error
+                                            });
+                                            writeln!(writer, "{}", tool_end)?;
+                                            writer.flush()?;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Text was already streamed in real-time via streaming_sink
+                // No need to re-send from summary
+
+                // 发送完成信号
+                let done = serde_json::json!({"type": "done"});
+                writeln!(writer, "{}", done)?;
+                writer.flush()?;
+
+                eprintln!("[claw-serve] [{}] done (streaming mode)", self.peer);
+                Ok(())
+            }
+            Err(error) => {
+                let err_msg = error.to_string();
+                runtime.shutdown_plugins()?;
+
+                // 给用户友好提示
+                let user_msg = if err_msg.contains("produced no content") {
+                    "模型未返回内容，可能原因：上下文过长、请求被限流、或内容策略限制。请尝试新建对话或简化问题。".to_string()
+                } else {
+                    err_msg.clone()
+                };
+
+                let err = serde_json::json!({"type": "error", "text": user_msg});
+                writeln!(writer, "{}", err)?;
+                writer.flush()?;
+                eprintln!("[claw-serve] [{}] prompt failed: {}", self.peer, err_msg);
+                Ok(())
+            }
+        }
+    }
+}
+
+fn handle_tcp_client(
+    stream: std::net::TcpStream,
+    model: &str,
+    permission_mode: PermissionMode,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{BufRead, BufReader, Write as IoWrite};
+
+    let peer = stream.peer_addr()?;
+    eprintln!("[claw-serve] [{peer}] client connected");
+
+    let reader = BufReader::new(stream.try_clone()?);
+    let mut writer = stream;
+
+    // 创建 LiveCli 实例（维护会话状态）
+    let resolved_model = resolve_repl_model(model.to_string());
+    let mut cli = LiveCli::new(resolved_model, true, None, permission_mode)?;
+    eprintln!("[claw-serve] [{peer}] LiveCli created, session: {}", cli.session.id);
+
+    // 注入工具执行权限说明，确保模型知道它可以执行系统命令
+    cli.system_prompt.push(
+        "\n# Tool Execution Environment\n\
+         You are running in a FULL ACCESS environment with DangerFullAccess permission mode.\n\
+         You have FULL permission to execute system commands via the PowerShell tool.\n\
+         You are NOT in a sandbox. You CAN and SHOULD use the PowerShell tool to run commands when the user asks.\n\
+         Available tools include: bash, PowerShell, read_file, write_file, edit_file, and more.\n\
+         When the user asks you to check system info, run commands, or perform any system operation, \
+         use the PowerShell tool directly. Do NOT say you cannot execute commands.\n\
+         Operating system: Windows. Shell: PowerShell.\n".to_string()
+    );
+
+    // 将 skills 信息注入系统提示词，让 AI 知道可用的 skills
+    let cwd = env::current_dir().unwrap_or_default();
+    {
+        // 只注入 skill 的名称和描述到系统提示词，不加载完整内容
+        // 完整的 references 文件由 AI 在需要时通过工具按需读取
+        let skills_dir = cwd.join(".claw").join("skills");
+        let mut skills_content = String::new();
+        if skills_dir.is_dir() {
+            if let Ok(entries) = fs::read_dir(&skills_dir) {
+                for entry in entries.flatten() {
+                    if entry.path().is_dir() {
+                        let skill_md = entry.path().join("SKILL.md");
+                        if skill_md.is_file() {
+                            if let Ok(content) = fs::read_to_string(&skill_md) {
+                                let name = entry.file_name().to_string_lossy().to_string();
+                                // 提取 frontmatter 中的 description
+                                let description = content
+                                    .strip_prefix("---")
+                                    .and_then(|s| s.split_once("---"))
+                                    .map(|(fm, _)| {
+                                        fm.lines()
+                                            .skip_while(|l| !l.starts_with("description"))
+                                            .skip(1)
+                                            .take_while(|l| l.starts_with("  "))
+                                            .map(|l| l.trim())
+                                            .collect::<Vec<_>>()
+                                            .join(" ")
+                                    })
+                                    .unwrap_or_default();
+                                let desc = if description.is_empty() {
+                                    // 单行 description
+                                    content
+                                        .lines()
+                                        .find(|l| l.starts_with("description:"))
+                                        .map(|l| l.trim_start_matches("description:").trim().to_string())
+                                        .unwrap_or_default()
+                                } else {
+                                    description
+                                };
+                                let skill_path = entry.path().display().to_string();
+                                skills_content.push_str(&format!(
+                                    "\n- **{name}**: {desc}\n  路径: {skill_path}/SKILL.md\n"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !skills_content.is_empty() {
+            let skills_prompt = format!(
+                "\n\n# Available Skills\n\
+                 以下是已安装的 skills。当用户的问题匹配某个 skill 时，\
+                 先用 read_file 工具读取该 skill 的 SKILL.md 获取完整指引，\
+                 然后按需读取其 references/ 目录下的相关文件来回答问题。\
+                 不要一次性读取所有 references 文件，只读取与当前问题相关的。\n\n{skills_content}"
+            );
+            cli.system_prompt.push(skills_prompt);
+            eprintln!("[claw-serve] [{peer}] skills injected into system prompt (lightweight)");
+        }
+    }
+
+    // 创建会话包装
+    let mut session = TcpClientSession::new(cli, peer);
+
+    // 发送就绪消息
+    let ready = serde_json::json!({
+        "type": "ready",
+        "model": session.cli.model,
+        "session_id": session.cli.session.id
+    });
+    eprintln!("[claw-serve] [{peer}] sending ready: {}", ready);
+    writeln!(writer, "{}", ready)?;
+    writer.flush()?;
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        eprintln!("[claw-serve] [{peer}] received: {line}");
+
+        let msg: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[claw-serve] [{peer}] JSON parse error: {e}");
+                let err = serde_json::json!({"type": "error", "text": format!("invalid JSON: {e}")});
+                writeln!(writer, "{}", err)?;
+                writer.flush()?;
+                continue;
+            }
+        };
+
+        let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+        match msg_type {
+            "prompt" => {
+                let text = msg.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                if text.is_empty() {
+                    eprintln!("[claw-serve] [{peer}] empty prompt, skipping");
+                    let err = serde_json::json!({"type": "error", "text": "empty prompt"});
+                    writeln!(writer, "{}", err)?;
+                    writer.flush()?;
+                    continue;
+                }
+
+                // Handle slash commands that should be executed locally (not sent to AI)
+                if text.trim().starts_with('/') {
+                    let slash_cmd = text.trim().trim_start_matches('/');
+                    let (cmd_name, _cmd_args) = slash_cmd.split_once(' ').unwrap_or((slash_cmd, ""));
+                    match cmd_name {
+                        "compact" => {
+                            eprintln!("[claw-serve] [{peer}] handling /compact");
+                            let compact_config = runtime::CompactionConfig::default();
+                            let result = session.cli.runtime.compact(compact_config);
+                            if result.removed_message_count > 0 {
+                                *session.cli.runtime.session_mut() = result.compacted_session;
+                                session.cli.persist_session().ok();
+                                eprintln!("[claw-serve] [{peer}] compacted: removed {} messages", result.removed_message_count);
+                            }
+                            // Always just send done — don't output any message to avoid polluting the chat
+                            let done = serde_json::json!({"type": "done"});
+                            writeln!(writer, "{}", done)?;
+                            writer.flush()?;
+                            continue;
+                        }
+                        "clear" => {
+                            eprintln!("[claw-serve] [{peer}] handling /clear");
+                            *session.cli.runtime.session_mut() = runtime::Session::new();
+                            session.cli.persist_session().ok();
+                            // Clear MCP cache so it reinitializes fresh
+                            session.cached_mcp_state = None;
+                            session.cached_mcp_tools = Vec::new();
+                            let msg = serde_json::json!({"type": "chunk", "text": "✅ 会话已重置。"});
+                            writeln!(writer, "{}", msg)?;
+                            writer.flush()?;
+                            let done = serde_json::json!({"type": "done"});
+                            writeln!(writer, "{}", done)?;
+                            writer.flush()?;
+                            continue;
+                        }
+                        "status" => {
+                            eprintln!("[claw-serve] [{peer}] handling /status");
+                            let session_info = session.cli.runtime.session();
+                            let msg_count = session_info.messages.len();
+                            let est_tokens = session.cli.runtime.estimated_tokens();
+                            let model = &session.cli.model;
+                            let status_text = format!(
+                                "📊 会话状态\n  模型: {}\n  消息数: {}\n  预估 tokens: {}\n  会话 ID: {}",
+                                model, msg_count, est_tokens, session.cli.session.id
+                            );
+                            let msg = serde_json::json!({"type": "chunk", "text": status_text});
+                            writeln!(writer, "{}", msg)?;
+                            writer.flush()?;
+                            let done = serde_json::json!({"type": "done"});
+                            writeln!(writer, "{}", done)?;
+                            writer.flush()?;
+                            continue;
+                        }
+                        "cost" => {
+                            eprintln!("[claw-serve] [{peer}] handling /cost");
+                            let usage = session.cli.runtime.usage().cumulative_usage();
+                            let cost_text = format!(
+                                "💰 Token 用量\n  输入: {}\n  输出: {}\n  合计: {}",
+                                usage.input_tokens, usage.output_tokens,
+                                usage.input_tokens + usage.output_tokens
+                            );
+                            let msg = serde_json::json!({"type": "chunk", "text": cost_text});
+                            writeln!(writer, "{}", msg)?;
+                            writer.flush()?;
+                            let done = serde_json::json!({"type": "done"});
+                            writeln!(writer, "{}", done)?;
+                            writer.flush()?;
+                            continue;
+                        }
+                        "version" => {
+                            eprintln!("[claw-serve] [{peer}] handling /version");
+                            let msg = serde_json::json!({"type": "chunk", "text": format!("🔧 Frontier v{}", env!("CARGO_PKG_VERSION"))});
+                            writeln!(writer, "{}", msg)?;
+                            writer.flush()?;
+                            let done = serde_json::json!({"type": "done"});
+                            writeln!(writer, "{}", done)?;
+                            writer.flush()?;
+                            continue;
+                        }
+                        "help" => {
+                            eprintln!("[claw-serve] [{peer}] handling /help");
+                            let help_text = "📋 可用命令:\n\
+                              /compact — 压缩会话历史\n\
+                              /clear — 重置会话\n\
+                              /status — 显示会话状态\n\
+                              /cost — 显示 token 用量\n\
+                              /version — 显示版本\n\
+                              /mcp — 查看 MCP 服务器状态\n\
+                              /help — 显示此帮助\n\
+                              \n其他命令（由 AI 处理）:\n\
+                              /commit, /pr, /issue, /diff, /review, /bughunter, /ultraplan";
+                            let msg = serde_json::json!({"type": "chunk", "text": help_text});
+                            writeln!(writer, "{}", msg)?;
+                            writer.flush()?;
+                            let done = serde_json::json!({"type": "done"});
+                            writeln!(writer, "{}", done)?;
+                            writer.flush()?;
+                            continue;
+                        }
+                        // All other slash commands: pass through to AI as normal prompt
+                        _ => {}
+                    }
+                }
+
+                // 使用 LiveCli 处理 prompt（保持会话上下文）
+                // 用 catch_unwind 防止 panic 断开 TCP 连接
+                let prompt_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    session.handle_prompt(text, &mut writer)
+                }));
+                match prompt_result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        eprintln!("[claw-serve] [{peer}] prompt error: {e}");
+                        let err = serde_json::json!({"type": "error", "text": e.to_string()});
+                        let _ = writeln!(writer, "{}", err);
+                        let _ = writer.flush();
+                    }
+                    Err(panic_info) => {
+                        let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "unknown panic".to_string()
+                        };
+                        eprintln!("[claw-serve] [{peer}] PANIC in handle_prompt: {panic_msg}");
+                        let err = serde_json::json!({"type": "error", "text": format!("internal error: {panic_msg}")});
+                        let _ = writeln!(writer, "{}", err);
+                        let _ = writer.flush();
+                    }
+                }
+            }
+            "reset" => {
+                // 重置会话：清空消息历史，保持连接和 runtime
+                eprintln!("[claw-serve] [{peer}] resetting session (clear messages)");
+                session.cli.runtime.session_mut().messages.clear();
+                let reset_done = serde_json::json!({"type": "reset_done", "session_id": session.cli.session.id});
+                writeln!(writer, "{}", reset_done)?;
+                writer.flush()?;
+                eprintln!("[claw-serve] [{peer}] session reset done");
+            }
+            "inject" => {
+                // 注入历史消息到 session（不调用 API）
+                // 格式: {"type":"inject","messages":[{"role":"user","text":"..."},{"role":"assistant","text":"..."}]}
+                eprintln!("[claw-serve] [{peer}] injecting history messages");
+                if let Some(messages) = msg.get("messages").and_then(|v| v.as_array()) {
+                    for m in messages {
+                        let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("");
+                        let text = m.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                        if text.is_empty() { continue; }
+                        match role {
+                            "user" => {
+                                let _ = session.cli.runtime.session_mut().push_user_text(text.to_string());
+                            }
+                            "assistant" => {
+                                let blocks = vec![runtime::ContentBlock::Text { text: text.to_string() }];
+                                let msg = runtime::ConversationMessage::assistant(blocks);
+                                let _ = session.cli.runtime.session_mut().push_message(msg);
+                            }
+                            _ => {}
+                        }
+                    }
+                    let count = messages.len();
+                    eprintln!("[claw-serve] [{peer}] injected {count} messages");
+                    let inject_done = serde_json::json!({"type": "inject_done", "count": count});
+                    writeln!(writer, "{}", inject_done)?;
+                    writer.flush()?;
+                } else {
+                    let err = serde_json::json!({"type": "inject_done", "count": 0, "error": "no messages array"});
+                    writeln!(writer, "{}", err)?;
+                    writer.flush()?;
+                }
+            }
+            "exit" => {
+                eprintln!("[claw-serve] [{peer}] client requested exit");
+                // 持久化会话
+                session.cli.persist_session()?;
+                break;
+            }
+            "history" => {
+                // 返回会话历史
+                let history: Vec<String> = session.cli.prompt_history
+                    .iter()
+                    .map(|e| e.text.clone())
+                    .collect();
+                let history_msg = serde_json::json!({"type": "history", "messages": history});
+                writeln!(writer, "{}", history_msg)?;
+                writer.flush()?;
+            }
+            _ => {
+                eprintln!("[claw-serve] [{peer}] unknown message type: {msg_type}");
+                let err = serde_json::json!({"type": "error", "text": format!("unknown type: {msg_type}")});
+                writeln!(writer, "{}", err)?;
+                writer.flush()?;
+            }
+        }
+    }
+
+    // 持久化会话
+    session.cli.persist_session()?;
+    eprintln!("[claw-serve] [{peer}] connection closed, session saved");
     Ok(())
 }
 
@@ -6924,7 +7546,7 @@ fn print_help_topic(
 }
 
 fn acp_status_message() -> &'static str {
-    "ACP/Zed editor integration is not implemented in claw-code yet. `claw acp serve` is only a discoverability alias today; it does not launch a daemon, JSON-RPC endpoint, or Zed-specific protocol endpoint. Use the normal terminal surfaces for now and track ROADMAP #76 for real ACP support."
+    "ACP/Zed editor integration is not implemented in Frontier yet. `claw acp serve` is only a discoverability alias today; it does not launch a daemon, JSON-RPC endpoint, or Zed-specific protocol endpoint. Use the normal terminal surfaces for now and track ROADMAP #76 for real ACP support."
 }
 
 fn acp_status_json() -> serde_json::Value {
@@ -7699,7 +8321,7 @@ fn render_version_report() -> String {
     let git_sha = GIT_SHA.unwrap_or("unknown");
     let target = BUILD_TARGET.unwrap_or("unknown");
     format!(
-        "Claw Code\n  Version          {VERSION}\n  Git SHA          {git_sha}\n  Target           {target}\n  Build date       {DEFAULT_DATE}"
+        "Frontier\n  Version          {VERSION}\n  Git SHA          {git_sha}\n  Target           {target}\n  Build date       {DEFAULT_DATE}"
     )
 }
 
@@ -8052,6 +8674,34 @@ fn build_runtime_plugin_state_with_loader(
         tool_registry,
         plugin_registry,
         mcp_state,
+    })
+}
+
+/// Build runtime plugin state reusing an existing MCP state (avoids restarting MCP servers)
+fn build_runtime_plugin_state_with_existing_mcp(
+    existing_mcp: Option<Arc<Mutex<RuntimeMcpState>>>,
+    cached_mcp_tools: &[RuntimeToolDefinition],
+) -> Result<RuntimePluginState, Box<dyn std::error::Error>> {
+    let cwd = env::current_dir()?;
+    let loader = ConfigLoader::default_for(&cwd);
+    let runtime_config = loader.load()?;
+    let plugin_manager = build_plugin_manager(&cwd, &loader, &runtime_config);
+    let plugin_registry = plugin_manager.plugin_registry()?;
+    let plugin_hook_config =
+        runtime_hook_config_from_plugin_hooks(plugin_registry.aggregated_hooks()?);
+    let feature_config = runtime_config
+        .feature_config()
+        .clone()
+        .with_hooks(runtime_config.hooks().merged(&plugin_hook_config));
+
+    // Reuse existing MCP state and cached tool definitions
+    let tool_registry = GlobalToolRegistry::with_plugin_tools(plugin_registry.aggregated_tools()?)?
+        .with_runtime_tools(cached_mcp_tools.to_vec())?;
+    Ok(RuntimePluginState {
+        feature_config,
+        tool_registry,
+        plugin_registry,
+        mcp_state: existing_mcp,
     })
 }
 
@@ -8608,6 +9258,8 @@ struct AnthropicRuntimeClient {
     tool_registry: GlobalToolRegistry,
     progress_reporter: Option<InternalPromptProgressReporter>,
     reasoning_effort: Option<String>,
+    /// Optional streaming sink for real-time event forwarding (serve mode)
+    streaming_sink: Option<Arc<Mutex<dyn std::io::Write + Send>>>,
 }
 
 impl AnthropicRuntimeClient {
@@ -8673,11 +9325,16 @@ impl AnthropicRuntimeClient {
             tool_registry,
             progress_reporter,
             reasoning_effort: None,
+            streaming_sink: None,
         })
     }
 
     fn set_reasoning_effort(&mut self, effort: Option<String>) {
         self.reasoning_effort = effort;
+    }
+
+    fn set_streaming_sink(&mut self, sink: Option<Arc<Mutex<dyn std::io::Write + Send>>>) {
+        self.streaming_sink = sink;
     }
 }
 
@@ -8698,9 +9355,9 @@ impl ApiClient for AnthropicRuntimeClient {
         }
         let is_post_tool = request_ends_with_tool_result(&request);
         let message_request = MessageRequest {
-            model: self.model.clone(),
+            model: strip_anthropic_prefix(&self.model),
             max_tokens: max_tokens_for_model(&self.model),
-            messages: convert_messages(&request.messages),
+            messages: sanitize_tool_use_pairs(convert_messages(&request.messages)),
             system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.join("\n\n")),
             tools: self
                 .enable_tools
@@ -8767,6 +9424,7 @@ impl AnthropicRuntimeClient {
         let mut markdown_stream = MarkdownStreamState::default();
         let mut events = Vec::new();
         let mut pending_tool: Option<(String, String, String)> = None;
+        let mut pending_thinking: Option<(String, Option<String>)> = None; // (thinking_text, signature)
         let mut block_has_thinking_summary = false;
         let mut saw_stop = false;
         let mut received_any_event = false;
@@ -8828,6 +9486,14 @@ impl AnthropicRuntimeClient {
                                     .and_then(|()| out.flush())
                                     .map_err(|error| RuntimeError::new(error.to_string()))?;
                             }
+                            // Stream text delta in real-time
+                            if let Some(ref sink) = self.streaming_sink {
+                                if let Ok(mut w) = sink.lock() {
+                                    let msg = serde_json::json!({"type": "chunk", "text": text});
+                                    let _ = writeln!(w, "{}", msg);
+                                    let _ = w.flush();
+                                }
+                            }
                             events.push(AssistantEvent::TextDelta(text));
                         }
                     }
@@ -8836,13 +9502,32 @@ impl AnthropicRuntimeClient {
                             input.push_str(&partial_json);
                         }
                     }
-                    ContentBlockDelta::ThinkingDelta { .. } => {
+                    ContentBlockDelta::ThinkingDelta { thinking } => {
                         if !block_has_thinking_summary {
                             render_thinking_block_summary(out, None, false)?;
                             block_has_thinking_summary = true;
                         }
+                        // Stream thinking delta in real-time
+                        if let Some(ref sink) = self.streaming_sink {
+                            if let Ok(mut w) = sink.lock() {
+                                let msg = serde_json::json!({"type": "thinking", "text": thinking});
+                                let _ = writeln!(w, "{}", msg);
+                                let _ = w.flush();
+                            }
+                        }
+                        // Accumulate thinking text for the AssistantEvent
+                        if let Some((ref mut text, _)) = pending_thinking {
+                            text.push_str(&thinking);
+                        } else {
+                            pending_thinking = Some((thinking, None));
+                        }
                     }
-                    ContentBlockDelta::SignatureDelta { .. } => {}
+                    ContentBlockDelta::SignatureDelta { signature } => {
+                        // Accumulate signature for the pending thinking block
+                        if let Some((_, ref mut sig)) = pending_thinking {
+                            *sig = Some(signature);
+                        }
+                    }
                 },
                 ApiStreamEvent::ContentBlockStop(_) => {
                     block_has_thinking_summary = false;
@@ -8851,9 +9536,23 @@ impl AnthropicRuntimeClient {
                             .and_then(|()| out.flush())
                             .map_err(|error| RuntimeError::new(error.to_string()))?;
                     }
+                    // Emit accumulated thinking block as an event
+                    if let Some((thinking, signature)) = pending_thinking.take() {
+                        if !thinking.is_empty() {
+                            events.push(AssistantEvent::Thinking { thinking, signature });
+                        }
+                    }
                     if let Some((id, name, input)) = pending_tool.take() {
                         if let Some(progress_reporter) = &self.progress_reporter {
                             progress_reporter.mark_tool_phase(&name, &input);
+                        }
+                        // Stream tool_start in real-time
+                        if let Some(ref sink) = self.streaming_sink {
+                            if let Ok(mut w) = sink.lock() {
+                                let msg = serde_json::json!({"type": "tool_start", "id": id, "name": name, "input": input});
+                                let _ = writeln!(w, "{}", msg);
+                                let _ = w.flush();
+                            }
                         }
                         // Display tool call now that input is fully accumulated
                         writeln!(out, "\n{}", format_tool_call_start(&name, &input))
@@ -9764,9 +10463,13 @@ fn push_output_block(
             };
             *pending_tool = Some((id, name, initial_input));
         }
-        OutputContentBlock::Thinking { thinking, .. } => {
+        OutputContentBlock::Thinking { thinking, signature } => {
             render_thinking_block_summary(out, Some(thinking.chars().count()), false)?;
             *block_has_thinking_summary = true;
+            // For non-streaming responses, emit the thinking event immediately
+            if !thinking.is_empty() {
+                events.push(AssistantEvent::Thinking { thinking, signature });
+            }
         }
         OutputContentBlock::RedactedThinking { .. } => {
             render_thinking_block_summary(out, None, true)?;
@@ -9972,6 +10675,99 @@ fn permission_policy(
     ))
 }
 
+/// Remove orphaned tool_use and tool_result blocks from the message history.
+/// - tool_use in an assistant message must have a matching tool_result in the next user message
+/// - tool_result in a user message must have a matching tool_use in the previous assistant message
+fn sanitize_tool_use_pairs(messages: Vec<InputMessage>) -> Vec<InputMessage> {
+    if messages.len() < 2 {
+        return messages;
+    }
+
+    let mut result = Vec::with_capacity(messages.len());
+
+    for i in 0..messages.len() {
+        let msg = &messages[i];
+
+        if msg.role == "assistant" {
+            // Find tool_result IDs in the next message (if it exists and is a user message)
+            let next_tool_result_ids: std::collections::HashSet<&str> =
+                if i + 1 < messages.len() && messages[i + 1].role == "user" {
+                    messages[i + 1]
+                        .content
+                        .iter()
+                        .filter_map(|block| match block {
+                            InputContentBlock::ToolResult { tool_use_id, .. } => {
+                                Some(tool_use_id.as_str())
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                } else {
+                    std::collections::HashSet::new()
+                };
+
+            // Keep tool_use only if there's a matching tool_result
+            let filtered_content: Vec<InputContentBlock> = msg
+                .content
+                .iter()
+                .filter(|block| match block {
+                    InputContentBlock::ToolUse { id, .. } => {
+                        next_tool_result_ids.contains(id.as_str())
+                    }
+                    _ => true,
+                })
+                .cloned()
+                .collect();
+
+            if !filtered_content.is_empty() {
+                result.push(InputMessage {
+                    role: msg.role.clone(),
+                    content: filtered_content,
+                });
+            }
+        } else if msg.role == "user" {
+            // Find tool_use IDs in the previous assistant message
+            let prev_tool_use_ids: std::collections::HashSet<&str> =
+                if i > 0 && messages[i - 1].role == "assistant" {
+                    messages[i - 1]
+                        .content
+                        .iter()
+                        .filter_map(|block| match block {
+                            InputContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+                            _ => None,
+                        })
+                        .collect()
+                } else {
+                    std::collections::HashSet::new()
+                };
+
+            // Keep tool_result only if there's a matching tool_use in the previous message
+            let filtered_content: Vec<InputContentBlock> = msg
+                .content
+                .iter()
+                .filter(|block| match block {
+                    InputContentBlock::ToolResult { tool_use_id, .. } => {
+                        prev_tool_use_ids.contains(tool_use_id.as_str())
+                    }
+                    _ => true,
+                })
+                .cloned()
+                .collect();
+
+            if !filtered_content.is_empty() {
+                result.push(InputMessage {
+                    role: msg.role.clone(),
+                    content: filtered_content,
+                });
+            }
+        } else {
+            result.push(msg.clone());
+        }
+    }
+
+    result
+}
+
 fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
     messages
         .iter()
@@ -9987,7 +10783,13 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                     ContentBlock::Text { text } => {
                         Some(InputContentBlock::Text { text: text.clone() })
                     }
-                    ContentBlock::Thinking { .. } => None,
+                    ContentBlock::Thinking {
+                        thinking,
+                        signature,
+                    } => Some(InputContentBlock::Thinking {
+                        thinking: thinking.clone(),
+                        signature: signature.clone(),
+                    }),
                     ContentBlock::ToolUse { id, name, input } => Some(InputContentBlock::ToolUse {
                         id: id.clone(),
                         name: name.clone(),
@@ -12576,7 +13378,7 @@ mod tests {
     fn formats_namespaced_omc_slash_command_with_contract_guidance() {
         let report = format_unknown_slash_command_message("oh-my-claudecode:hud");
         assert!(report.contains("unknown slash command: /oh-my-claudecode:hud"));
-        assert!(report.contains("Claude Code/OMC plugin command"));
+        assert!(report.contains("Frontier/OMC plugin command"));
         assert!(report.contains("plugin slash commands"));
         assert!(report.contains("statusline"));
         assert!(report.contains("session hooks"));
@@ -13906,7 +14708,7 @@ UU conflicted.rs",
     fn unknown_omc_slash_command_guidance_explains_runtime_gap() {
         let message = format_unknown_slash_command("oh-my-claudecode:hud");
         assert!(message.contains("Unknown slash command: /oh-my-claudecode:hud"));
-        assert!(message.contains("Claude Code/OMC plugin command"));
+        assert!(message.contains("Frontier/OMC plugin command"));
         assert!(message.contains("does not yet load plugin slash commands"));
     }
 

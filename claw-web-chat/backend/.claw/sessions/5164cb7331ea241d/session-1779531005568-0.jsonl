@@ -1,0 +1,2 @@
+{"created_at_ms":1779531005567,"model":"claude-opus-4-6","session_id":"session-1779531005568-0","type":"session_meta","updated_at_ms":1779531005567,"version":1,"workspace_root":"D:\\AI_LLM\\LLM\\claw-code\\claw-code"}
+{"message":{"blocks":[{"text":"你现在调用的是哪个模型，哪个api URL","type":"text"}],"role":"user"},"type":"message"}

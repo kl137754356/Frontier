@@ -1,0 +1,10 @@
+{
+  "node_version": "20",
+  "dependencies": [
+    "."
+  ],
+  "graphs": {
+    "sample_agent": "./agent-ts/main.ts:graph"
+  },
+  "env": ".env"
+}

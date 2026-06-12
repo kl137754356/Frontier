@@ -44,6 +44,7 @@ mod sse;
 pub mod stale_base;
 pub mod stale_branch;
 pub mod summary_compression;
+pub mod sysinfo;
 pub mod task_packet;
 pub mod task_registry;
 pub mod team_cron_registry;
@@ -178,6 +179,11 @@ pub use stale_base::{
 pub use stale_branch::{
     apply_policy, check_freshness, BranchFreshness, StaleBranchAction, StaleBranchEvent,
     StaleBranchPolicy,
+};
+pub use sysinfo::{
+    format_bytes, CpuInfo, DiskInfo, GpuInfo, MemoryInfo, MemoryModule,
+    MotherboardInfo, NetworkAdapterInfo, OsInfo, PartitionInfo, ProbeError, ProbeReport,
+    SystemProbe,
 };
 pub use task_packet::{
     validate_packet, TaskPacket, TaskPacketValidationError, TaskResource, ValidatedPacket,

@@ -6,7 +6,7 @@ This page is the PowerShell-first path for installing, verifying, and safely swi
 
 ### Option A: build from source in PowerShell
 
-Use this when you are developing Claw Code or testing a local checkout.
+Use this when you are developing Frontier or testing a local checkout.
 
 ```powershell
 git clone https://github.com/ultraworkers/claw-code

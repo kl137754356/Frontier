@@ -1,0 +1,680 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>AI 代码助手 - 悬浮球演示</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+
+        body {
+            background: #f6f6f6;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* ======================
+           悬浮球
+        ====================== */
+        #floatBall {
+            position: fixed;
+            width: 58px;
+            height: 58px;
+            border-radius: 50%;
+            right: 30px;
+            bottom: 30px;
+            cursor: pointer;
+            overflow: hidden;
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
+            user-select: none;
+            z-index: 9999;
+        }
+
+        #floatBall video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border-radius: 50%;
+            pointer-events: none;
+        }
+
+        /* ======================
+           聊天窗口
+        ====================== */
+        #chatWindow {
+            position: fixed;
+            width: 420px;
+            height: 680px;
+            background: white;
+            border-radius: 18px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
+            display: none;
+            flex-direction: column;
+            overflow: hidden;
+            z-index: 999;
+        }
+
+        /* 标题栏 */
+        .chat-header {
+            padding: 16px;
+            background: #6366f1;
+            color: white;
+            font-weight: 500;
+            font-size: 16px;
+        }
+
+        /* 消息区域 */
+        .chat-body {
+            flex: 1;
+            padding: 16px;
+            overflow-y: auto;
+            background: #f9fafb;
+        }
+
+        .message {
+            margin-bottom: 12px;
+            max-width: 75%;
+            line-height: 1.4;
+        }
+
+        .user-msg {
+            margin-left: auto;
+            background: #6366f1;
+            color: white;
+            padding: 10px 14px;
+            border-radius: 14px 14px 4px 14px;
+        }
+
+        .ai-msg {
+            background: white;
+            border: 1px solid #e5e7eb;
+            padding: 10px 14px;
+            border-radius: 14px 14px 14px 4px;
+            color: #111827;
+        }
+
+        .ai-msg code {
+            background: #f1f5f9;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: monospace;
+        }
+
+        .ai-msg pre {
+            background: #f1f5f9;
+            padding: 10px;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 6px 0;
+        }
+
+        /* 输入区域 */
+        .chat-footer {
+            padding: 12px;
+            border-top: 1px solid #eee;
+        }
+
+        .input-box {
+            border: 1px solid #e5e7eb;
+            border-radius: 16px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            background: #fff;
+        }
+
+        .input-box textarea {
+            width: 100%;
+            min-height: 40px;
+            max-height: calc(340px - 44px); /* 聊天窗口高度680px的一半减去底部操作栏高度 */
+            padding: 12px 14px;
+            border: none;
+            outline: none;
+            resize: none;
+            font-size: 14px;
+            line-height: 1.5;
+            font-family: inherit;
+            overflow-y: auto;
+        }
+
+        .input-actions {
+            display: flex;
+            align-items: center;
+            padding: 6px 10px;
+            border-top: 1px solid #f3f4f6;
+            gap: 4px;
+        }
+
+        .input-actions .action-btn {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            border: none;
+            background: transparent;
+            color: #6b7280;
+            font-size: 16px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.15s, color 0.15s;
+        }
+
+        .input-actions .action-btn:hover {
+            background: #f3f4f6;
+            color: #6366f1;
+        }
+
+        .input-actions .send-btn {
+            padding: 6px 16px;
+            background: #6366f1;
+            color: white;
+            border: none;
+            border-radius: 14px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .input-actions .send-btn:hover {
+            background: #4f46e5;
+        }
+
+        .input-actions .extra-btn {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            border: none;
+            background: transparent;
+            color: #6b7280;
+            font-size: 16px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.15s, color 0.15s;
+        }
+
+        .input-actions .extra-btn:hover {
+            background: #f3f4f6;
+            color: #6366f1;
+        }
+
+        /* ======================
+           历史对话面板
+        ====================== */
+        #historyPanel {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            top: 0;
+            background: white;
+            display: none;
+            flex-direction: column;
+            z-index: 10;
+        }
+
+        .history-header {
+            padding: 14px 16px;
+            border-bottom: 1px solid #e5e7eb;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-weight: 500;
+            font-size: 15px;
+            color: #111827;
+        }
+
+        .history-header .close-btn {
+            width: 28px;
+            height: 28px;
+            border: none;
+            background: transparent;
+            font-size: 18px;
+            cursor: pointer;
+            border-radius: 6px;
+            color: #6b7280;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .history-header .close-btn:hover {
+            background: #f3f4f6;
+        }
+
+        .history-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px;
+        }
+
+        .history-item {
+            padding: 12px 14px;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: background 0.15s;
+            margin-bottom: 4px;
+        }
+
+        .history-item:hover {
+            background: #f3f4f6;
+        }
+
+        .history-item .history-title {
+            font-size: 14px;
+            color: #111827;
+            margin-bottom: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .history-item .history-time {
+            font-size: 12px;
+            color: #9ca3af;
+        }
+
+        .history-item.active {
+            background: #eef2ff;
+        }
+
+        /* 滚动条 */
+        .chat-body::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .chat-body::-webkit-scrollbar-thumb {
+            background: #ddd;
+            border-radius: 3px;
+        }
+
+        /* ======================
+           右键菜单
+        ====================== */
+        #contextMenu {
+            position: fixed;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 6px 24px rgba(0, 0, 0, 0.15);
+            padding: 6px 0;
+            min-width: 140px;
+            display: none;
+            z-index: 10000;
+        }
+
+        #contextMenu .menu-item {
+            padding: 10px 18px;
+            cursor: pointer;
+            font-size: 14px;
+            color: #333;
+            transition: background 0.15s;
+        }
+
+        #contextMenu .menu-item:hover {
+            background: #f3f4f6;
+        }
+
+        #contextMenu .menu-divider {
+            height: 1px;
+            background: #e5e7eb;
+            margin: 4px 0;
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- 悬浮球 -->
+    <div id="floatBall">
+        <video src="20250928_124212.mp4" autoplay loop muted playsinline></video>
+    </div>
+
+    <!-- 聊天窗口 -->
+    <div id="chatWindow">
+        <div class="chat-header">
+            <span>Polaris 助手</span>
+        </div>
+        <div class="chat-body" id="chatBody">
+            <div class="message ai-msg">你好！我是Hexagon助手，你可以问我各种问题～</div>
+        </div>
+        <div class="chat-footer">
+            <div class="input-box">
+                <textarea id="inputMsg" placeholder="请输入问题..." rows="2"></textarea>
+                <div class="input-actions">
+                    <button class="action-btn" id="screenshotBtn" title="截图">📷</button>
+                    <button class="action-btn" id="attachBtn" title="上传附件">📎</button>
+                    <input type="file" id="fileInput" style="display:none" multiple>
+                    <button class="extra-btn" id="newChatBtn" title="新建对话" style="margin-left:auto">➕</button>
+                    <button class="extra-btn" id="historyBtn" title="历史对话">🕘</button>
+                    <button class="send-btn" id="sendBtn">发送</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 历史对话面板 -->
+        <div id="historyPanel">
+            <div class="history-header">
+                <span>历史对话</span>
+                <button class="close-btn" id="closeHistoryBtn">✕</button>
+            </div>
+            <div class="history-list" id="historyList"></div>
+        </div>
+    </div>
+
+    <!-- 右键菜单 -->
+    <div id="contextMenu">
+        <div class="menu-item" data-action="login">🔑 登入</div>
+        <div class="menu-divider"></div>
+        <div class="menu-item" data-action="settings">⚙️ 设置</div>
+        <div class="menu-divider"></div>
+        <div class="menu-item" data-action="about">ℹ️ 关于</div>
+    </div>
+
+    <script>
+        // ======================
+        // 元素引用
+        // ======================
+        const floatBall = document.getElementById('floatBall');
+        const chatWindow = document.getElementById('chatWindow');
+        const chatBody = document.getElementById('chatBody');
+        const inputMsg = document.getElementById('inputMsg');
+        const sendBtn = document.getElementById('sendBtn');
+        const contextMenu = document.getElementById('contextMenu');
+
+        // ======================
+        // 悬浮球拖动 + 点击切换
+        // ======================
+        let isDragging = false;
+        let hasMoved = false;
+        let startX, startY, ballX, ballY;
+
+        // 根据悬浮球位置定位聊天窗口
+        function positionChatWindow() {
+            const rect = floatBall.getBoundingClientRect();
+            const winW = window.innerWidth;
+            const winH = window.innerHeight;
+            const chatW = 420;
+            const chatH = 680;
+            const gap = 12;
+
+            let left, top;
+
+            // 水平方向：优先放在悬浮球左侧，放不下则放右侧
+            if (rect.left - chatW - gap >= 0) {
+                left = rect.left - chatW - gap;
+            } else if (rect.right + gap + chatW <= winW) {
+                left = rect.right + gap;
+            } else {
+                left = Math.max(0, Math.min(rect.left - chatW - gap, winW - chatW));
+            }
+
+            // 垂直方向：底部对齐悬浮球底部，超出则调整
+            top = rect.bottom - chatH;
+            if (top < 0) top = 0;
+            if (top + chatH > winH) top = winH - chatH;
+
+            chatWindow.style.left = left + 'px';
+            chatWindow.style.top = top + 'px';
+        }
+
+        floatBall.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return; // 只响应左键
+            isDragging = true;
+            hasMoved = false;
+            startX = e.clientX;
+            startY = e.clientY;
+            const rect = floatBall.getBoundingClientRect();
+            ballX = rect.left;
+            ballY = rect.top;
+            e.preventDefault();
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            const dx = e.clientX - startX;
+            const dy = e.clientY - startY;
+            if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+                hasMoved = true;
+            }
+            floatBall.style.left = (ballX + dx) + 'px';
+            floatBall.style.top = (ballY + dy) + 'px';
+            floatBall.style.right = 'auto';
+            floatBall.style.bottom = 'auto';
+            // 拖动时同步更新聊天窗口位置
+            if (chatWindow.style.display === 'flex') {
+                positionChatWindow();
+            }
+        });
+
+        document.addEventListener('mouseup', (e) => {
+            if (!isDragging) return;
+            isDragging = false;
+            // 如果没有移动，视为点击 → 切换聊天窗口
+            if (!hasMoved) {
+                if (chatWindow.style.display === 'flex') {
+                    chatWindow.style.display = 'none';
+                } else {
+                    positionChatWindow();
+                    chatWindow.style.display = 'flex';
+                }
+            }
+        });
+
+        // ======================
+        // 右键菜单
+        // ======================
+        floatBall.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            contextMenu.style.left = e.clientX + 'px';
+            contextMenu.style.top = e.clientY + 'px';
+            contextMenu.style.display = 'block';
+        });
+
+        // 点击其他区域关闭菜单
+        document.addEventListener('click', (e) => {
+            if (!contextMenu.contains(e.target)) {
+                contextMenu.style.display = 'none';
+            }
+        });
+
+        // 菜单项点击
+        contextMenu.addEventListener('click', (e) => {
+            const item = e.target.closest('.menu-item');
+            if (!item) return;
+            const action = item.dataset.action;
+            contextMenu.style.display = 'none';
+            switch (action) {
+                case 'login':
+                    alert('登入功能开发中...');
+                    break;
+                case 'settings':
+                    alert('设置功能开发中...');
+                    break;
+                case 'about':
+                    alert('Polaris 助手 v1.0');
+                    break;
+            }
+        });
+
+        // ======================
+        // 发送消息
+        // ======================
+        function sendMessage() {
+            const msg = inputMsg.value.trim();
+            if (!msg) return;
+
+            // 用户消息
+            chatBody.innerHTML += `<div class="message user-msg">${msg}</div>`;
+            inputMsg.value = '';
+            autoResizeTextarea();
+            chatBody.scrollTop = chatBody.scrollHeight;
+
+            // AI 回复（模拟）
+            setTimeout(() => {
+                const reply = `
+这是一段可运行的代码：
+<pre><code>function hello() {
+  console.log("Hello Frontier!");
+}</code></pre>
+需要我帮你解释或修改吗？`;
+
+                chatBody.innerHTML += `<div class="message ai-msg">${reply}</div>`;
+                chatBody.scrollTop = chatBody.scrollHeight;
+            }, 800);
+        }
+
+        sendBtn.addEventListener('click', sendMessage);
+        inputMsg.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        // ======================
+        // 输入框自动扩展高度
+        // ======================
+        function autoResizeTextarea() {
+            inputMsg.style.height = 'auto';
+            const maxH = 340 - 44; // 聊天窗口一半高度减去操作栏
+            const scrollH = inputMsg.scrollHeight;
+            if (scrollH > maxH) {
+                inputMsg.style.height = maxH + 'px';
+                inputMsg.style.overflowY = 'auto';
+            } else {
+                inputMsg.style.height = scrollH + 'px';
+                inputMsg.style.overflowY = 'hidden';
+            }
+        }
+
+        inputMsg.addEventListener('input', autoResizeTextarea);
+
+        // ======================
+        // 截图工具
+        // ======================
+        const screenshotBtn = document.getElementById('screenshotBtn');
+        screenshotBtn.addEventListener('click', () => {
+            alert('截图工具启动中...');
+            // TODO: 接入实际截图功能
+        });
+
+        // ======================
+        // 附件上传
+        // ======================
+        const attachBtn = document.getElementById('attachBtn');
+        const fileInput = document.getElementById('fileInput');
+
+        attachBtn.addEventListener('click', () => {
+            fileInput.click();
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            const files = e.target.files;
+            if (!files.length) return;
+            for (const file of files) {
+                chatBody.innerHTML += `<div class="message user-msg">📎 ${file.name}</div>`;
+            }
+            chatBody.scrollTop = chatBody.scrollHeight;
+            fileInput.value = '';
+        });
+
+        // ======================
+        // 新建对话 + 历史对话
+        // ======================
+        const newChatBtn = document.getElementById('newChatBtn');
+        const historyBtn = document.getElementById('historyBtn');
+        const historyPanel = document.getElementById('historyPanel');
+        const closeHistoryBtn = document.getElementById('closeHistoryBtn');
+        const historyList = document.getElementById('historyList');
+
+        // 对话存储
+        let conversations = [];
+        let currentConvId = null;
+
+        // 初始化第一个对话
+        function initFirstConversation() {
+            const conv = {
+                id: Date.now(),
+                title: '新对话',
+                time: new Date().toLocaleString(),
+                messages: chatBody.innerHTML
+            };
+            conversations.push(conv);
+            currentConvId = conv.id;
+        }
+        initFirstConversation();
+
+        // 新建对话
+        newChatBtn.addEventListener('click', () => {
+            // 保存当前对话
+            saveCurrentConversation();
+            // 创建新对话
+            const conv = {
+                id: Date.now(),
+                title: '新对话',
+                time: new Date().toLocaleString(),
+                messages: '<div class="message ai-msg">你好！我是Hexagon助手，你可以问我各种问题～</div>'
+            };
+            conversations.push(conv);
+            currentConvId = conv.id;
+            chatBody.innerHTML = conv.messages;
+        });
+
+        // 保存当前对话内容
+        function saveCurrentConversation() {
+            const conv = conversations.find(c => c.id === currentConvId);
+            if (conv) {
+                conv.messages = chatBody.innerHTML;
+                // 用第一条用户消息作为标题
+                const firstUserMsg = chatBody.querySelector('.user-msg');
+                if (firstUserMsg) {
+                    conv.title = firstUserMsg.textContent.slice(0, 20) || '新对话';
+                }
+            }
+        }
+
+        // 打开历史面板
+        historyBtn.addEventListener('click', () => {
+            saveCurrentConversation();
+            renderHistoryList();
+            historyPanel.style.display = 'flex';
+        });
+
+        // 关闭历史面板
+        closeHistoryBtn.addEventListener('click', () => {
+            historyPanel.style.display = 'none';
+        });
+
+        // 渲染历史列表
+        function renderHistoryList() {
+            historyList.innerHTML = conversations.map(conv => `
+                <div class="history-item ${conv.id === currentConvId ? 'active' : ''}" data-id="${conv.id}">
+                    <div class="history-title">${conv.title}</div>
+                    <div class="history-time">${conv.time}</div>
+                </div>
+            `).reverse().join('');
+        }
+
+        // 点击历史项切换对话
+        historyList.addEventListener('click', (e) => {
+            const item = e.target.closest('.history-item');
+            if (!item) return;
+            const id = Number(item.dataset.id);
+            const conv = conversations.find(c => c.id === id);
+            if (conv) {
+                saveCurrentConversation();
+                currentConvId = conv.id;
+                chatBody.innerHTML = conv.messages;
+                historyPanel.style.display = 'none';
+            }
+        });
+    </script>
+</body>
+</html>

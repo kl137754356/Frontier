@@ -1,0 +1,104 @@
+' ============================================================
+' 探针文件: PROBE-EXT-A100-M3R4.prb
+' 描述:    CMM 加长杆探针（TP200 + 100mm 陶瓷杆 + M3 cube + Ø4 红宝石球）
+' 适用:    深孔/腔体内壁/狭窄区域测量
+' 适用软件: PC-DMIS 2020 R2 或更高
+' 创建日期: 2026-05-15
+' ============================================================
+
+' --- 探针主声明（PROBE）---
+' 语法: PROBE/PROBE_NAME, KEYID=<n>, I=<i>, J=<j>, K=<k>, DIAM=<d>, \
+'                   SHANK IJK=<si>,<sj>,<sk>, ULI=<uli>, ULIANG=<a>, \
+'                   TRIGFORCE=<LOW|MED|HIGH>, COMMENT=<comment>
+'
+' KEYID:    探针在 PH10 库位中的物理编号
+' I,J,K:    测头坐标系到机器坐标系的旋转分量（无测座时为 0,0,1）
+' DIAM:     测针球径（mm）
+' SHANK IJK: 测针杆方向（默认 0,0,1）
+' ULIANG:   加长杆方向角度（仅 TP200 + 长杆时设置）
+' TRIGFORCE: 触发力档位（长杆工况推荐 LOW）
+
+PROBE/PROBE_EXT_A100_M3R4
+  KEYID       = 7
+  I           = 0
+  J           = 0
+  K           = 1
+  SHANK IJK   = 0, 0, 1
+  DIAM        = 4.0000
+  COMMENT     = "TP200 + 100mm Ceramic Extension + M3 Cube + Ø4 Ruby L30"
+
+' --- 测针声明（TIP）---
+' 语法: TIP/TIP_NAME, PROBE=<probe>, SHAPE=<SPHERE|…, ..., DIAM=<d>, \
+'                    I=<i>, J=<j>, K=<k>, LENGTH=<len>, COLOR=<c>, \
+'                    ANG_VEC=<i,j,k>, COMMENT=<comment>
+'
+' 一颗测针对应一个 TIP；多探针时用 TIP1, TIP2, TIP3...
+
+TIP/TIP_M3R4_L30, PROBE=PROBE_EXT_A100_M3R4
+  SHAPE       = SPHERE
+  DIAM        = 4.0000
+  I           = 0.0000
+  J           = 0.0000
+  K           = 1.0000
+  LENGTH      = 30.0000
+  COLOR       = RED
+  COMMENT     = "A-5003-7553 Ø4 Ruby, M3 thread, 30mm stem"
+  $          ' TIP 结束
+
+' ============================================================
+' 触发力与速度参数（与 PROBE 绑定）
+' ============================================================
+
+' 触发力（仅 TP200 档位设置：LOW / MED / HIGH）
+SETTRIGFORCE/PROBE_EXT_A100_M3R4, LOW
+
+' 移动速度（mm/s）
+'  -- 长杆工况限位 5 mm/s；高速扫描需先做挠度验证
+SETSPEED/5.0, PROBE_EXT_A100_M3R4
+
+' 预触发距离（mm）—— 避免过冲
+SETPREHIT/0.5, PROBE_EXT_A100_M3R4
+
+' 退回距离（mm）
+SETRETRACT/2.0, PROBE_EXT_A100_M3R4
+
+' ============================================================
+' 标定默认值（运行时由 calibration.bas 覆盖）
+' ============================================================
+
+' 默认测头直径（标定后更新）
+PROBEDIAM/PROBE_EXT_A100_M3R4 = 4.0000
+
+' 默认 I/J/K 偏移（标定后更新为实测值）
+PROBE_OFFSET/PROBE_EXT_A100_M3R4, I = 0.0000, J = 0.0000, K = 132.0000
+
+' 长杆挠度系数（K-factor，标定后更新）
+' K 越大表示同等力下挠度越大；典型陶瓷 100mm 杆 K ≈ 0.3 µm/N
+PROBE_FLEX_K/PROBE_EXT_A100_M3R4 = 0.3
+
+' ============================================================
+' 探针切换宏（在主程序中调用 USE_PROBE_EXT_A100_M3R4 即可装载）
+' ============================================================
+
+DEFINE_MACRO/USE_PROBE_EXT_A100_M3R4
+  LOADPROBE/PROBE_EXT_A100_M3R4
+  ACTIVATE_TIP/TIP_M3R4_L30
+  SETTRIGFORCE/PROBE_EXT_A100_M3R4, LOW
+  SETSPEED/5.0, PROBE_EXT_A100_M3R4
+  SETPREHIT/0.5, PROBE_EXT_A100_M3R4
+  SETRETRACT/2.0, PROBE_EXT_A100_M3R4
+END_DEFMACRO
+
+' ============================================================
+' 探针安全移动（清空探测）
+' ============================================================
+
+DEFINE_MACRO/SAFE_MOVE_TO_CLEAR
+  CLEARP/ZPLUS, 50.0
+  MOVE/CLEARPLANE
+END_DEFMACRO
+
+' ============================================================
+' 文件结束
+' ============================================================
+END_OF_FILE

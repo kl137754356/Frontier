@@ -1,4 +1,4 @@
-# Claw Code
+# Frontier
 
 <p align="center">
   <a href="https://github.com/ultraworkers/claw-code">ultraworkers/claw-code</a>
@@ -29,16 +29,16 @@
 </p>
 
 <p align="center">
-  <img src="assets/claw-hero.jpeg" alt="Claw Code" width="300" />
+  <img src="assets/claw-hero.jpeg" alt="Frontier" width="300" />
 </p>
 
-Claw Code is the public Rust implementation of the `claw` CLI agent harness.
+Frontier is the public Rust implementation of the `claw` CLI agent harness.
 The canonical implementation lives in [`rust/`](./rust), and the current source of truth for this repository is **ultraworkers/claw-code**.
 
 > [!IMPORTANT]
 > Start with [`USAGE.md`](./USAGE.md) for build, auth, CLI, session, and parity-harness workflows. For file submission/navigation questions, see [Navigation and file context](./docs/navigation-file-context.md). For local OpenAI-compatible models and offline skill installs, see [Local OpenAI-compatible providers and skills setup](./docs/local-openai-compatible-providers.md). Windows users can jump to the PowerShell-first [Windows install and release quickstart](./docs/windows-install-release.md). Make `claw doctor` your first health check after building, use [`rust/README.md`](./rust/README.md) for crate-level details, read [`PARITY.md`](./PARITY.md) for the current Rust-port checkpoint, and see [`docs/container.md`](./docs/container.md) for the container-first workflow.
 >
-> **ACP / Zed status:** `claw-code` does not ship an ACP/Zed daemon or JSON-RPC entrypoint yet. Run `claw acp` (or `claw --acp`) for the current status instead of guessing from source layout; `claw acp serve` is currently a discoverability alias only, returns status with exit code 0, and real ACP support remains tracked separately in `ROADMAP.md`. For the public JSON contract, see [`docs/g011-acp-json-rpc-status-contract.md`](./docs/g011-acp-json-rpc-status-contract.md).
+> **ACP / Zed status:** Frontier does not ship an ACP/Zed daemon or JSON-RPC entrypoint yet. Run `claw acp` (or `claw --acp`) for the current status instead of guessing from source layout; `claw acp serve` is currently a discoverability alias only, returns status with exit code 0, and real ACP support remains tracked separately in `ROADMAP.md`. For the public JSON contract, see [`docs/g011-acp-json-rpc-status-contract.md`](./docs/g011-acp-json-rpc-status-contract.md).
 
 ## Current repository shape
 
@@ -220,7 +220,7 @@ cargo test --workspace
 
 ## Ecosystem
 
-Claw Code is built in the open alongside the broader UltraWorkers toolchain:
+Frontier is built in the open alongside the broader UltraWorkers toolchain:
 
 - [clawhip](https://github.com/Yeachan-Heo/clawhip)
 - [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent)

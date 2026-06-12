@@ -1,0 +1,147 @@
+@import 'highlight.js/styles/github.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+    line-height: 1.5;
+    font-weight: 400;
+  }
+
+  html, body, #root {
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+  }
+
+  body {
+    min-width: 320px;
+    @apply bg-white text-gray-900;
+  }
+
+  .dark body {
+    @apply bg-gray-900 text-gray-100;
+  }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-gray-300 dark:bg-gray-600 rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-gray-400 dark:bg-gray-500;
+  }
+}
+
+@layer utilities {
+  /* Transition animations */
+  .transition-sidebar {
+    transition: width 200ms ease-in-out, opacity 150ms ease-in-out;
+  }
+
+  .transition-theme {
+    transition: background-color 200ms ease-in-out, color 200ms ease-in-out,
+      border-color 200ms ease-in-out;
+  }
+
+  /* Toast animation */
+  @keyframes slideIn {
+    from {
+      transform: translateX(100%);
+      opacity: 0;
+    }
+    to {
+      transform: translateX(0);
+      opacity: 1;
+    }
+  }
+
+  .animate-slide-in {
+    animation: slideIn 0.3s ease-out;
+  }
+}
+
+@layer components {
+  /* Dark mode syntax highlighting override */
+  .dark pre code.hljs {
+    color: #c9d1d9;
+    background: transparent;
+  }
+  .dark .hljs-keyword, .dark .hljs-type { color: #ff7b72; }
+  .dark .hljs-title, .dark .hljs-title.function_ { color: #d2a8ff; }
+  .dark .hljs-string { color: #a5d6ff; }
+  .dark .hljs-comment { color: #8b949e; }
+  .dark .hljs-number { color: #79c0ff; }
+  .dark .hljs-attr { color: #79c0ff; }
+  .dark .hljs-built_in { color: #ffa657; }
+
+  /* Light mode: ensure hljs doesn't override our background */
+  pre code.hljs {
+    background: transparent !important;
+    color: #24292e;
+  }
+
+  /* Enhanced markdown rendering in chat messages */
+  .prose pre {
+    position: relative;
+  }
+
+  .prose pre code {
+    font-size: 13px;
+    line-height: 1.6;
+    color: #24292e;
+  }
+
+  .dark .prose pre code {
+    color: #c9d1d9;
+  }
+
+  /* Table styling */
+  .prose table {
+    @apply w-full text-sm border-collapse;
+  }
+
+  .prose thead {
+    @apply bg-gray-50 dark:bg-gray-800;
+  }
+
+  .prose tbody tr:hover {
+    @apply bg-gray-50/50 dark:bg-gray-800/50;
+  }
+
+  /* List marker styling */
+  .prose ul > li::marker {
+    @apply text-gray-400 dark:text-gray-500;
+  }
+
+  .prose ol > li::marker {
+    @apply text-gray-500 dark:text-gray-400 font-medium;
+  }
+
+  /* Inline code distinction from code blocks */
+  .prose :not(pre) > code {
+    @apply text-pink-600 dark:text-pink-400 font-medium;
+  }
+
+  /* Checkbox styling for task lists (GFM) */
+  .prose input[type="checkbox"] {
+    @apply rounded border-gray-300 dark:border-gray-600 mr-1.5;
+  }
+
+  /* Strikethrough */
+  .prose del {
+    @apply text-gray-400 dark:text-gray-500;
+  }
+}

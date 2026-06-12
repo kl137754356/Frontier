@@ -339,6 +339,16 @@ pub fn provider_diagnostics_for_model(model: &str) -> ProviderDiagnostics {
 
 #[must_use]
 pub fn detect_provider_kind(model: &str) -> ProviderKind {
+    // 当 OPENAI_BASE_URL 已设置且有 OPENAI_API_KEY，但没有 Anthropic 认证时，
+    // 优先使用 OpenAI 兼容路径（即使模型名匹配 claude-*）。
+    // 这支持通过 OpenAI 兼容代理（如 hexai.top）访问 Claude 模型的场景。
+    if std::env::var_os("OPENAI_BASE_URL").is_some()
+        && openai_compat::has_api_key("OPENAI_API_KEY")
+        && !anthropic::has_auth_from_env_or_saved().unwrap_or(false)
+    {
+        return ProviderKind::OpenAi;
+    }
+
     if let Some(metadata) = metadata_for_model(model) {
         return metadata.provider;
     }

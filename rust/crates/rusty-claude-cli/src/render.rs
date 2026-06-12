@@ -1,29 +1,41 @@
+// ============================================================
+// Frontier - 终端渲染模块
+// 文件位置：rust/crates/rusty-claude-cli/src/render.rs
+// 功能：终端输出渲染，包括 Markdown 渲染、语法高亮、Spinner 动画
+// ============================================================
+
 use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
 
+// Crossterm - 跨平台终端操作库
 use crossterm::cursor::{MoveToColumn, RestorePosition, SavePosition};
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor, Stylize};
 use crossterm::terminal::{Clear, ClearType};
 use crossterm::{execute, queue};
+
+// Pulldown-cmark - Markdown 解析库
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+
+// Syntect - 语法高亮库
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::{as_24_bit_terminal_escaped, LinesWithEndings};
 
+/// 颜色主题 - 定义终端输出的颜色方案
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColorTheme {
-    heading: Color,
-    emphasis: Color,
-    strong: Color,
-    inline_code: Color,
-    link: Color,
-    quote: Color,
-    table_border: Color,
-    code_block_border: Color,
-    spinner_active: Color,
-    spinner_done: Color,
-    spinner_failed: Color,
+    heading: Color,              // 标题颜色
+    emphasis: Color,             // 强调颜色
+    strong: Color,               // 粗体颜色
+    inline_code: Color,          // 行内代码颜色
+    link: Color,                 // 链接颜色
+    quote: Color,                // 引用颜色
+    table_border: Color,         // 表格边框颜色
+    code_block_border: Color,    // 代码块边框颜色
+    spinner_active: Color,       // Spinner 活跃状态颜色
+    spinner_done: Color,         // Spinner 完成颜色
+    spinner_failed: Color,       // Spinner 失败颜色
 }
 
 impl Default for ColorTheme {
@@ -44,40 +56,45 @@ impl Default for ColorTheme {
     }
 }
 
+/// Spinner 动画组件 - 用于显示加载中的动画效果
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Spinner {
-    frame_index: usize,
+    frame_index: usize,  // 当前帧索引
 }
 
 impl Spinner {
+    /// Spinner 动画帧（使用 Braille 盲文字符）
     const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+    /// 创建新的 Spinner
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// 更新一帧动画 - 在等待时调用，显示旋转的 Spinner
     pub fn tick(
         &mut self,
-        label: &str,
-        theme: &ColorTheme,
-        out: &mut impl Write,
+        label: &str,           // 显示的标签文本
+        theme: &ColorTheme,    // 颜色主题
+        out: &mut impl Write,  // 输出目标
     ) -> io::Result<()> {
         let frame = Self::FRAMES[self.frame_index % Self::FRAMES.len()];
         self.frame_index += 1;
         queue!(
             out,
-            SavePosition,
-            MoveToColumn(0),
-            Clear(ClearType::CurrentLine),
-            SetForegroundColor(theme.spinner_active),
-            Print(format!("{frame} {label}")),
-            ResetColor,
-            RestorePosition
+            SavePosition,            // 保存光标位置
+            MoveToColumn(0),         // 移动到行首
+            Clear(ClearType::CurrentLine),  // 清除当前行
+            SetForegroundColor(theme.spinner_active),  // 设置活跃颜色
+            Print(format!("{frame} {label}")),  // 打印 Spinner 和标签
+            ResetColor,              // 重置颜色
+            RestorePosition          // 恢复光标位置
         )?;
         out.flush()
     }
 
+    /// 完成 Spinner - 显示成功状态（绿色勾号）
     pub fn finish(
         &mut self,
         label: &str,
@@ -96,6 +113,7 @@ impl Spinner {
         out.flush()
     }
 
+    /// Spinner 失败 - 显示错误状态（红色叉号）
     pub fn fail(
         &mut self,
         label: &str,

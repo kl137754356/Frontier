@@ -926,16 +926,7 @@ fn wire_model_for_base_url<'a>(
     let lowered_prefix = prefix.to_ascii_lowercase();
 
     if lowered_prefix == "openai" {
-        let trimmed_base_url = base_url.trim_end_matches('/');
-        let default_openai = DEFAULT_OPENAI_BASE_URL.trim_end_matches('/');
-        if config.provider_name == "OpenAI" && trimmed_base_url != default_openai {
-            // OpenAI-compatible gateways such as OpenRouter commonly use
-            // slash-containing model slugs (for example `openai/gpt-4.1-mini`).
-            // Preserve the slug when the user configured a non-default OpenAI
-            // base URL; the prefix still routed to the OpenAI-compatible client,
-            // but the gateway owns the final model namespace.
-            return Cow::Borrowed(model);
-        }
+        // 始终去掉 openai/ 前缀，将实际模型名发送给 API
         return Cow::Borrowed(&model[pos + 1..]);
     }
 
@@ -1151,7 +1142,7 @@ pub fn translate_message(message: &InputMessage, model: &str) -> Vec<Value> {
                 }
             }
             let include_reasoning =
-                model_requires_reasoning_content_in_history(model) && !reasoning.is_empty();
+                model_requires_reasoning_content_in_history(model);
             if text.is_empty() && tool_calls.is_empty() && !include_reasoning {
                 Vec::new()
             } else {

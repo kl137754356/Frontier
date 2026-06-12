@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "metrology": {
+      "command": "${MCP_SERVERS_DIR}/metrology-mcp.exe",
+      "args": [],
+      "env": {},
+      "disabled": false
+    },
+    "pcdmis": {
+      "command": "${MCP_SERVERS_DIR}/pcdmis-mcp.exe",
+      "args": [],
+      "env": {},
+      "disabled": false
+    }
+  }
+}

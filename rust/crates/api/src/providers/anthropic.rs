@@ -480,7 +480,15 @@ impl AnthropicClient {
             .post(request_url)
             .header("content-type", "application/json");
         let mut request_builder = self.auth.apply(request_builder);
+
+        // Only send beta headers to official Anthropic API.
+        // Third-party proxies (especially those routing to AWS Bedrock) reject unknown beta flags.
+        let is_official = self.base_url.contains("anthropic.com");
+
         for (header_name, header_value) in self.request_profile.header_pairs() {
+            if !is_official && header_name == "anthropic-beta" {
+                continue;
+            }
             request_builder = request_builder.header(header_name, header_value);
         }
         request_builder

@@ -1,0 +1,9 @@
+{
+  "name": "a2ui-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server providing the present_choices A2UI tool for claw-code (zero dependencies)",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  }
+}

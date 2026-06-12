@@ -1,3 +1,9 @@
+// ============================================================
+// 会话运行时模块 (Conversation Runtime Module)
+// ============================================================
+// 提供对话运行时的核心功能，包括对话循环、工具执行、权限管理和自动压缩
+// 协调模型调用、工具执行、钩子运行和会话状态更新
+
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 
@@ -15,61 +21,98 @@ use crate::permissions::{
 use crate::session::{ContentBlock, ConversationMessage, Session};
 use crate::usage::{TokenUsage, UsageTracker};
 
-const DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD: u32 = 100_000;
-const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS";
+// 常量定义
+const DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD: u32 = 100_000;  // 默认自动压缩输入 Token 阈值
+const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS";  // 环境变量名
 
-/// Fully assembled request payload sent to the upstream model client.
+// ============================================================
+// API 请求 (Api Request)
+// ============================================================
+// 向上游模型客户端发送的完整请求负载
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiRequest {
-    pub system_prompt: Vec<String>,
-    pub messages: Vec<ConversationMessage>,
+    pub system_prompt: Vec<String>,           // 系统提示词列表
+    pub messages: Vec<ConversationMessage>,   // 对话消息列表
 }
 
-/// Streamed events emitted while processing a single assistant turn.
+// ============================================================
+// 助手事件 (Assistant Event)
+// ============================================================
+// 处理单个助手轮次时发出的流式事件
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssistantEvent {
-    Thinking {
-        thinking: String,
-        signature: Option<String>,
+    Thinking {                     // 思考过程事件
+        thinking: String,          // 思考内容
+        signature: Option<String>, // 签名（可选）
     },
-    TextDelta(String),
-    ToolUse {
-        id: String,
-        name: String,
-        input: String,
+    TextDelta(String),            // 文本增量事件
+    ToolUse {                     // 工具使用事件
+        id: String,               // 工具调用 ID
+        name: String,             // 工具名称
+        input: String,            // 工具输入
     },
-    Usage(TokenUsage),
-    PromptCache(PromptCacheEvent),
-    MessageStop,
+    Usage(TokenUsage),            // Token 使用统计事件
+    PromptCache(PromptCacheEvent),// 提示缓存事件
+    MessageStop,                  // 消息结束事件
 }
 
-/// Prompt-cache telemetry captured from the provider response stream.
+// ============================================================
+// 提示缓存事件 (Prompt Cache Event)
+// ============================================================
+// 从提供者响应流中捕获的提示缓存遥测数据
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptCacheEvent {
-    pub unexpected: bool,
-    pub reason: String,
-    pub previous_cache_read_input_tokens: u32,
-    pub current_cache_read_input_tokens: u32,
-    pub token_drop: u32,
+    pub unexpected: bool,                              // 是否意外
+    pub reason: String,                                // 原因描述
+    pub previous_cache_read_input_tokens: u32,         // 之前的缓存读取输入 Token 数
+    pub current_cache_read_input_tokens: u32,          // 当前的缓存读取输入 Token 数
+    pub token_drop: u32,                               // Token 丢弃数
 }
 
-/// Minimal streaming API contract required by [`ConversationRuntime`].
+// ============================================================
+// API 客户端 trait (Api Client Trait)
+// ============================================================
+// ConversationRuntime 所需的最小流式 API 契约
+
 pub trait ApiClient {
+    /// 发送流式请求并返回事件列表
+    /// # 参数
+    /// - request: API 请求
+    /// # 返回值
+    /// 成功返回事件列表，失败返回运行时错误
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError>;
 }
 
-/// Trait implemented by tool dispatchers that execute model-requested tools.
+// ============================================================
+// 工具执行器 trait (Tool Executor Trait)
+// ============================================================
+// 由工具调度器实现，��于执行模型请求的工具
+
 pub trait ToolExecutor {
+    /// 执行工具调用
+    /// # 参数
+    /// - tool_name: 工具名称
+    /// - input: 工具输入
+    /// # 返回值
+    /// 成功返回输出字符串，失败返回工具错误
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError>;
 }
 
-/// Error returned when a tool invocation fails locally.
+// ============================================================
+// 工具错误 (Tool Error)
+// ============================================================
+// 工具调用本地失败时返回的错误
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolError {
-    message: String,
+    message: String,  // 错误消息
 }
 
 impl ToolError {
+    /// 创建新的工具错误
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
         Self {
@@ -86,13 +129,18 @@ impl Display for ToolError {
 
 impl std::error::Error for ToolError {}
 
-/// Error returned when a conversation turn cannot be completed.
+// ============================================================
+// 运行时错误 (Runtime Error)
+// ============================================================
+// 对话轮次无法完成时返回的错误
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeError {
-    message: String,
+    message: String,  // 错误消息
 }
 
 impl RuntimeError {
+    /// 创建新的运行时错误
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
         Self {
@@ -109,37 +157,50 @@ impl Display for RuntimeError {
 
 impl std::error::Error for RuntimeError {}
 
-/// Summary of one completed runtime turn, including tool results and usage.
+// ============================================================
+// 轮次摘要 (Turn Summary)
+// ============================================================
+// 单个完成的运行时轮次的摘要，包含工具结果和使用统计
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnSummary {
-    pub assistant_messages: Vec<ConversationMessage>,
-    pub tool_results: Vec<ConversationMessage>,
-    pub prompt_cache_events: Vec<PromptCacheEvent>,
-    pub iterations: usize,
-    pub usage: TokenUsage,
-    pub auto_compaction: Option<AutoCompactionEvent>,
+    pub assistant_messages: Vec<ConversationMessage>,  // 助手消息列表
+    pub tool_results: Vec<ConversationMessage>,        // 工具结果列表
+    pub prompt_cache_events: Vec<PromptCacheEvent>,    // 提示缓存事件列表
+    pub iterations: usize,                             // 迭代次数
+    pub usage: TokenUsage,                             // Token 使用统计
+    pub auto_compaction: Option<AutoCompactionEvent>, // 自动压缩事件（可选）
 }
 
-/// Details about automatic session compaction applied during a turn.
+// ============================================================
+// 自动压缩事件 (Auto Compaction Event)
+// ============================================================
+// 轮次期间应用的自动会话压缩详情
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AutoCompactionEvent {
-    pub removed_message_count: usize,
+    pub removed_message_count: usize,  // 移除的消息数量
 }
 
-/// Coordinates the model loop, tool execution, hooks, and session updates.
+// ============================================================
+// 会话运行时 (Conversation Runtime)
+// ============================================================
+// 协调模型循环、工具执行、钩子和会话更新的核心结构
+// 使用泛型参数 C（API 客户端）和 T（工具执行器）实现灵活组合
+
 pub struct ConversationRuntime<C, T> {
-    session: Session,
-    api_client: C,
-    tool_executor: T,
-    permission_policy: PermissionPolicy,
-    system_prompt: Vec<String>,
-    max_iterations: usize,
-    usage_tracker: UsageTracker,
-    hook_runner: HookRunner,
-    auto_compaction_input_tokens_threshold: u32,
-    hook_abort_signal: HookAbortSignal,
-    hook_progress_reporter: Option<Box<dyn HookProgressReporter>>,
-    session_tracer: Option<SessionTracer>,
+    session: Session,                                      // 会话状态
+    api_client: C,                                         // API 客户端
+    tool_executor: T,                                      // 工具执行器
+    permission_policy: PermissionPolicy,                   // 权限策略
+    system_prompt: Vec<String>,                            // 系统提示词
+    max_iterations: usize,                                 // 最大迭代次数
+    usage_tracker: UsageTracker,                           // 使用统计跟踪器
+    hook_runner: HookRunner,                               // 钩子运行器
+    auto_compaction_input_tokens_threshold: u32,           // 自动压缩输入 Token 阈值
+    hook_abort_signal: HookAbortSignal,                    // 钩子中止信号
+    hook_progress_reporter: Option<Box<dyn HookProgressReporter>>, // 钩子进度报告器
+    session_tracer: Option<SessionTracer>,                 // 会话追踪器
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -147,6 +208,13 @@ where
     C: ApiClient,
     T: ToolExecutor,
 {
+    /// 使用默认功能配置创建新的会话运行时
+    /// # 参数
+    /// - session: 会话状态
+    /// - api_client: API 客户端
+    /// - tool_executor: 工具执行器
+    /// - permission_policy: 权限策略
+    /// - system_prompt: 系统提示词列表
     #[must_use]
     pub fn new(
         session: Session,
@@ -165,6 +233,14 @@ where
         )
     }
 
+    /// 使用自定义功能配置创建新的会话运行时
+    /// # 参数
+    /// - session: 会话状态
+    /// - api_client: API 客户端
+    /// - tool_executor: 工具执行器
+    /// - permission_policy: 权限策略
+    /// - system_prompt: 系统提示词列表
+    /// - feature_config: 功能配置
     #[must_use]
     #[allow(clippy::needless_pass_by_value)]
     pub fn new_with_features(
@@ -192,24 +268,36 @@ where
         }
     }
 
+    /// 设置最大迭代次数
+    /// # 参数
+    /// - max_iterations: 最大迭代次数
     #[must_use]
     pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
         self.max_iterations = max_iterations;
         self
     }
 
+    /// 设置自动压缩输入 Token 阈值
+    /// # 参数
+    /// - threshold: 阈值
     #[must_use]
     pub fn with_auto_compaction_input_tokens_threshold(mut self, threshold: u32) -> Self {
         self.auto_compaction_input_tokens_threshold = threshold;
         self
     }
 
+    /// 设置钩子中止信号
+    /// # 参数
+    /// - hook_abort_signal: 中止信号
     #[must_use]
     pub fn with_hook_abort_signal(mut self, hook_abort_signal: HookAbortSignal) -> Self {
         self.hook_abort_signal = hook_abort_signal;
         self
     }
 
+    /// 设置钩子进度报告器
+    /// # 参数
+    /// - hook_progress_reporter: 进度报告器
     #[must_use]
     pub fn with_hook_progress_reporter(
         mut self,
@@ -219,12 +307,21 @@ where
         self
     }
 
+    /// 设置会话追踪器
+    /// # 参数
+    /// - session_tracer: 追踪器
     #[must_use]
     pub fn with_session_tracer(mut self, session_tracer: SessionTracer) -> Self {
         self.session_tracer = Some(session_tracer);
         self
     }
 
+    /// 运行工具使用前钩子
+    /// # 参数
+    /// - tool_name: 工具名称
+    /// - input: 工具输入
+    /// # 返回值
+    /// 钩子运行结果
     fn run_pre_tool_use_hook(&mut self, tool_name: &str, input: &str) -> HookRunResult {
         if let Some(reporter) = self.hook_progress_reporter.as_mut() {
             self.hook_runner.run_pre_tool_use_with_context(
@@ -243,6 +340,14 @@ where
         }
     }
 
+    /// 运行工具使用后钩子
+    /// # 参数
+    /// - tool_name: 工具名称
+    /// - input: 工具输入
+    /// - output: 工具输出
+    /// - is_error: 是否错误
+    /// # 返回值
+    /// 钩子运行结果
     fn run_post_tool_use_hook(
         &mut self,
         tool_name: &str,
@@ -271,6 +376,13 @@ where
         }
     }
 
+    /// 运行工具使用失败钩子
+    /// # 参数
+    /// - tool_name: 工具名称
+    /// - input: 工具输入
+    /// - output: 工具输出
+    /// # 返回值
+    /// 钩子运行结果
     fn run_post_tool_use_failure_hook(
         &mut self,
         tool_name: &str,
@@ -296,21 +408,22 @@ where
         }
     }
 
-    /// Run a session health probe to verify the runtime is functional after compaction.
-    /// Returns Ok(()) if healthy, Err if the session appears broken.
+    /// 运行会话健康检查探针
+    /// 验证压缩后会话状态是否正常
+    /// # 返回值
+    /// 正常返回 Ok(())，异常返回错误信息
     fn run_session_health_probe(&mut self) -> Result<(), String> {
-        // Check if we have basic session integrity
+        // 检查会话完整性
         if self.session.messages.is_empty() && self.session.compaction.is_some() {
-            // Freshly compacted with no messages - this is normal
+            // 刚压缩且无消息是正常情况
             return Ok(());
         }
 
-        // Verify tool executor is responsive with a non-destructive probe
-        // Using glob_search with a pattern that won't match anything
+        // 使用 glob_search 探针验证工具执行器响应
         let probe_input = r#"{"pattern": "*.health-check-probe-"}"#;
         match self.tool_executor.execute("glob_search", probe_input) {
             Ok(_) => Ok(()),
-            Err(e) => Err(format!("Tool executor probe failed: {e}")),
+            Err(e) => Err(format!("工具执行器探针失败: {e}")),
         }
     }
 
@@ -351,6 +464,12 @@ where
                 );
                 self.record_turn_failed(iterations, &error);
                 return Err(error);
+            }
+
+            // Check abort signal between iterations — allows early exit when interrupted
+            if self.hook_abort_signal.is_aborted() {
+                // Return what we have so far as a partial result
+                break;
             }
 
             let request = ApiRequest {

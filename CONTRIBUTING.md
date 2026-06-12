@@ -1,6 +1,6 @@
-# Contributing to Claw Code
+# Contributing to Frontier
 
-Thanks for helping improve Claw Code. This repository is a Rust-first CLI
+Thanks for helping improve Frontier. This repository is a Rust-first CLI
 workspace with supporting docs and compatibility fixtures.
 
 ## Ground rules

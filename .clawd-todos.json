@@ -1,0 +1,37 @@
+[
+  {
+    "content": "搭建 probes/ 目录与方案总览 README",
+    "activeForm": "搭建探针方案目录骨架",
+    "status": "completed"
+  },
+  {
+    "content": "输出探针规格说明与 BOM 清单（CSV）",
+    "activeForm": "输出探针规格与 BOM 清单",
+    "status": "completed"
+  },
+  {
+    "content": "生成 PC-DMIS 探针定义文件 (.prb)",
+    "activeForm": "生成 PC-DMIS 探针定义",
+    "status": "completed"
+  },
+  {
+    "content": "生成 PC-DMIS 标定程序骨架 (.bas)",
+    "activeForm": "编写标定程序",
+    "status": "completed"
+  },
+  {
+    "content": "生成 PC-DMIS 测量程序骨架 (.bas)",
+    "activeForm": "编写测量程序骨架",
+    "status": "completed"
+  },
+  {
+    "content": "生成不确定度评估模板",
+    "activeForm": "编写不确定度评估模板",
+    "status": "completed"
+  },
+  {
+    "content": "输出 config.json 探针配置元数据",
+    "activeForm": "输出探针配置元数据",
+    "status": "in_progress"
+  }
+]

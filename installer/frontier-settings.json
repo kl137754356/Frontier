@@ -1,0 +1,86 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "D:\\AI_LLM\\LLM\\claw-code\\claw-code_network"
+      ]
+    },
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"]
+    },
+    "sequential-thinking": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+    },
+    "everything": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-everything"]
+    },
+    "fetch": {
+      "command": "npx",
+      "args": ["-y", "@kazuph/mcp-fetch"]
+    },
+    "git": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@cyanheads/git-mcp-server"
+      ],
+      "env": {
+        "MCP_LOG_LEVEL": "info"
+      }
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "在此填入_GitHub_Personal_Access_Token"
+      },
+      "disabled": true,
+      "_comment": "需要在 https://github.com/settings/tokens 生成 token，填好后把 disabled 改为 false"
+    },
+    "puppeteer": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-puppeteer"],
+      "disabled": true,
+      "_comment": "首次启动会下载 Chromium（约 170MB），按需启用：把 disabled 改为 false"
+    },
+    "brave-search": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "env": {
+        "BRAVE_API_KEY": "在此填入_Brave_Search_API_Key"
+      },
+      "disabled": true,
+      "_comment": "免费 key 申请：https://brave.com/search/api/ ，填好后把 disabled 改为 false"
+    },
+    "postgres": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-postgres",
+        "postgresql://user:password@localhost:5432/dbname"
+      ],
+      "disabled": true,
+      "_comment": "需要本地或远程 PostgreSQL，修改连接串后把 disabled 改为 false"
+    },
+    "sqlite": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-server-sqlite-npx",
+        "D:\\AI_LLM\\LLM\\claw-code\\claw-code_network\\test.db"
+      ],
+      "disabled": true,
+      "_comment": "本地 SQLite 数据库，准备好 .db 文件后把 disabled 改为 false"
+    },
+    "time": {
+      "command": "npx",
+      "args": ["-y", "@theo.foobar/mcp-time"]
+    }
+  }
+}

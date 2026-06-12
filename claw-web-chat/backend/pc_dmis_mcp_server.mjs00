@@ -1,0 +1,442 @@
+#!/usr/bin/env node
+/**
+ * PC-DMIS 尺寸测量 MCP 服务器 (Node.js 版)
+ * 提供三坐标测量机的自动化工具，通过 MCP 协议供 AI 调用。
+ * 
+ * 安装依赖：npm install
+ * 启动方式：
+ *   node pc_dmis_mcp_server.js          # stdio 模式
+ *   node pc_dmis_mcp_server.js --sse    # SSE (HTTP) 模式
+ */
+
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { z } from 'zod';
+import { spawn, execSync } from 'child_process';
+import http from 'http';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+// ============================================================
+// PC-DMIS COM 控制器 (通过 PowerShell 子进程)
+// ============================================================
+
+/** 调用 PowerShell 执行 COM 操作 */
+function runPsScript(psCode) {
+  try {
+    const result = execSync(
+      `powershell -NoProfile -Command "${psCode.replace(/"/g, '\\"')}"`,
+      { encoding: 'utf-8', timeout: 30000 }
+    );
+    return result.trim();
+  } catch (e) {
+    return `错误: ${e.message}`;
+  }
+}
+
+class PCDMISController {
+  constructor() {
+    this.connected = false;
+  }
+
+  connect() {
+    const result = runPsScript(`
+      try {
+        $app = New-Object -ComObject PCDLRN.Application
+        $app.Visible = $true
+        $part = $app.ActivePartProgram
+        Write-Output "已连接到 PC-DMIS，零件程序: $($part.Name)"
+      } catch {
+        Write-Output "连接失败: $_"
+      }
+    `);
+    this.connected = !result.startsWith('连接失败') && !result.startsWith('错误');
+    return result;
+  }
+
+  getStatus() {
+    if (!this.connected) {
+      return { connected: false, message: '未连接' };
+    }
+    const result = runPsScript(`
+      try {
+        $app = New-Object -ComObject PCDLRN.Application
+        $part = $app.ActivePartProgram
+        $cmds = $part.Commands
+        Write-Output ($cmds.Count)
+      } catch {
+        Write-Output "ERROR: $_"
+      }
+    `);
+    if (result.startsWith('ERROR')) {
+      return { connected: false, message: result };
+    }
+    return {
+      connected: true,
+      partName: '(active)',
+      commandCount: parseInt(result) || 0
+    };
+  }
+
+  addCommand(commandText) {
+    if (!this.connected) return '错误：未连接到 PC-DMIS';
+    const escaped = commandText.replace(/'/g, "''");
+    const result = runPsScript(`
+      try {
+        $app = New-Object -ComObject PCDLRN.Application
+        $part = $app.ActivePartProgram
+        $cmds = $part.Commands
+        $count = $cmds.Count
+        $cmds.AddCommand('${escaped}', $count + 1)
+        Write-Output "命令已添加"
+      } catch {
+        Write-Output "添加失败: $_"
+      }
+    `);
+    return result;
+  }
+
+  runProgram() {
+    if (!this.connected) return '错误：未连接到 PC-DMIS';
+    return runPsScript(`
+      try {
+        $app = New-Object -ComObject PCDLRN.Application
+        $part = $app.ActivePartProgram
+        $part.Run()
+        Write-Output "零件程序已开始执行"
+      } catch {
+        Write-Output "运行失败: $_"
+      }
+    `);
+  }
+
+  /** 构建 PC-DMIS 特征测量命令 */
+  buildFeatureCommand(featureType, params) {
+    const name = params.name || `${featureType.toUpperCase()}_1`;
+    switch (featureType.toUpperCase()) {
+      case 'POINT': {
+        const { x = 0, y = 0, z = 0 } = params;
+        return `${name} =FEAT/POINT,CART,${x.toFixed(4)},${y.toFixed(4)},${z.toFixed(4)},0,0,1\nMEAS/POINT,${name},1\nENDMES`;
+      }
+      case 'CIRCLE': {
+        const { x = 0, y = 0, z = 0, diameter = 10, i = 0, j = 0, k = 1, points = 4 } = params;
+        return `${name} =FEAT/CIRCLE,CART,${x.toFixed(4)},${y.toFixed(4)},${z.toFixed(4)},${i.toFixed(4)},${j.toFixed(4)},${k.toFixed(4)},${diameter.toFixed(4)}\nMEAS/CIRCLE,${name},${points}\nENDMES`;
+      }
+      case 'PLANE': {
+        const { points = 3 } = params;
+        return `${name} =FEAT/PLANE,CART,$\nMEAS/PLANE,${name},${points}\nENDMES`;
+      }
+      case 'CYLINDER': {
+        const { x = 0, y = 0, z = 0, diameter = 10, height = 20, i = 0, j = 0, k = 1, points = 4, layers = 2 } = params;
+        return `${name} =FEAT/CYLINDER,CART,${x.toFixed(4)},${y.toFixed(4)},${z.toFixed(4)},${i.toFixed(4)},${j.toFixed(4)},${k.toFixed(4)},${diameter.toFixed(4)},${height.toFixed(4)}\nMEAS/CYLINDER,${name},${points},${layers}\nENDMES`;
+      }
+      case 'LINE': {
+        const { x1 = 0, y1 = 0, z1 = 0, x2 = 1, y2 = 0, z2 = 0, points = 2 } = params;
+        return `${name} =FEAT/LINE,CART,${x1.toFixed(4)},${y1.toFixed(4)},${z1.toFixed(4)},${x2.toFixed(4)},${y2.toFixed(4)},${z2.toFixed(4)},0,0,1\nMEAS/LINE,${name},${points}\nENDMES`;
+      }
+      default:
+        return `不支持的特征类型: ${featureType}`;
+    }
+  }
+
+  measureFeature(featureType, params) {
+    const cmd = this.buildFeatureCommand(featureType, params);
+    return this.addCommand(cmd);
+  }
+
+  addDimension(dimType, feat1, feat2, tols = {}) {
+    if (!this.connected) return '错误：未连接到 PC-DMIS';
+    const nominal = tols.nominal ?? 0;
+    const upper = tols.upperTol ?? 0.1;
+    const lower = tols.lowerTol ?? 0.1;
+
+    const dimCmds = {
+      DISTANCE: `DIM/${feat1}_TO_${feat2}= DISTANCE FROM ${feat1} TO ${feat2},$\n    NOMINAL=${nominal},TOL_U=${upper},TOL_L=${lower}$\n    `,
+      POSITION: `DIM/${feat1}_POS= POSITION OF ${feat1},$\n    NOMINAL=${nominal},TOL_U=${upper},TOL_L=${lower}$\n    `,
+      TRUE_POSITION: `DIM/${feat1}_TP= TRUE POSITION OF ${feat1},$\n    NOMINAL=${nominal},TOL_U=${upper},TOL_L=${lower}$\n    `,
+      FLATNESS: `DIM/${feat1}_FLAT= FLATNESS OF ${feat1},$\n    NOMINAL=${nominal},TOL_U=${upper}$\n    `,
+      ROUNDNESS: `DIM/${feat1}_ROUND= ROUNDNESS OF ${feat1},$\n    NOMINAL=${nominal},TOL_U=${upper}$\n    `,
+      ANGLE: `DIM/${feat1}_TO_${feat2}= ANGLE BETWEEN ${feat1} AND ${feat2},$\n    NOMINAL=${nominal},TOL_U=${upper},TOL_L=${lower}$\n    `,
+    };
+
+    const cmd = dimCmds[dimType.toUpperCase()];
+    if (!cmd) return `不支持的尺寸类型: ${dimType}`;
+
+    return this.addCommand(cmd);
+  }
+
+  createAlignment(name, levelFeature, rotateFeature, originFeature) {
+    if (!this.connected) return '错误：未连接到 PC-DMIS';
+    const parts = [`ALIGNMENT/START,${name}`];
+    if (levelFeature) parts.push(`${name}_${levelFeature}_LEVEL= ALIGN/LEVEL,ZPLUS,${levelFeature}`);
+    if (rotateFeature) parts.push(`${name}_${rotateFeature}_ROTATE= ALIGN/ROTATE,XPLUS,TO,${rotateFeature},ABOUT,ZPLUS`);
+    if (originFeature) parts.push(`${name}_ORIGIN= ALIGN/TRANS,XAXIS,${originFeature},YAXIS,${originFeature},ZAXIS,${originFeature}`);
+    parts.push('ALIGNMENT/END');
+
+    const results = parts.map(p => this.addCommand(p));
+    return `已创建对齐 '${name}':\n${parts.join('\n')}`;
+  }
+}
+
+// ============================================================
+// 创建 MCP 服务器
+// ============================================================
+
+const ctrl = new PCDMISController();
+
+const server = new McpServer({
+  name: 'pc-dmis-server',
+  version: '1.0.0',
+  instructions: 'PC-DMIS 三坐标测量机自动化控制 MCP 服务器。'
+});
+
+// --- 工具注册 ---
+
+server.tool(
+  'connect',
+  '连接到正在运行的 PC-DMIS 应用程序（必须先调用此工具）',
+  {},
+  async () => {
+    const result = ctrl.connect();
+    return { content: [{ type: 'text', text: result }] };
+  }
+);
+
+server.tool(
+  'get_status',
+  '获取 PC-DMIS 连接状态和当前零件程序信息',
+  {},
+  async () => {
+    const status = ctrl.getStatus();
+    return { content: [{ type: 'text', text: JSON.stringify(status, null, 2) }] };
+  }
+);
+
+server.tool(
+  'measure_point',
+  '测量点特征',
+  {
+    name: z.string().describe('特征名称'),
+    x: z.number().describe('X 坐标'),
+    y: z.number().describe('Y 坐标'),
+    z: z.number().describe('Z 坐标'),
+  },
+  async ({ name, x, y, z }) => {
+    const result = ctrl.measureFeature('POINT', { name, x, y, z });
+    return { content: [{ type: 'text', text: result }] };
+  }
+);
+
+server.tool(
+  'measure_circle',
+  '测量圆特征',
+  {
+    name: z.string().describe('特征名称'),
+    x: z.number().describe('圆心 X 坐标'),
+    y: z.number().describe('圆心 Y 坐标'),
+    z: z.number().describe('圆心 Z 坐标（投影平面高度）'),
+    diameter: z.number().describe('标称直径'),
+    i: z.number().optional().default(0).describe('法矢 I 分量'),
+    j: z.number().optional().default(0).describe('法矢 J 分量'),
+    k: z.number().optional().default(1).describe('法矢 K 分量'),
+    points: z.number().optional().default(4).describe('测量点数'),
+  },
+  async (params) => {
+    const result = ctrl.measureFeature('CIRCLE', params);
+    return { content: [{ type: 'text', text: result }] };
+  }
+);
+
+server.tool(
+  'measure_plane',
+  '测量平面特征',
+  {
+    name: z.string().describe('特征名称'),
+    points: z.number().optional().default(3).describe('测量点数'),
+  },
+  async ({ name, points }) => {
+    const result = ctrl.measureFeature('PLANE', { name, points });
+    return { content: [{ type: 'text', text: result }] };
+  }
+);
+
+server.tool(
+  'measure_cylinder',
+  '测量圆柱特征',
+  {
+    name: z.string().describe('特征名称'),
+    x: z.number().describe('圆心 X 坐标'),
+    y: z.number().describe('圆心 Y 坐标'),
+    z: z.number().describe('圆心 Z 坐标'),
+    diameter: z.number().describe('标称直径'),
+    height: z.number().describe('圆柱高度'),
+    i: z.number().optional().default(0).describe('法矢 I 分量'),
+    j: z.number().optional().default(0).describe('法矢 J 分量'),
+    k: z.number().optional().default(1).describe('法矢 K 分量'),
+    points: z.number().optional().default(4).describe('每层测量点数'),
+    layers: z.number().optional().default(2).describe('测量层数'),
+  },
+  async (params) => {
+    const result = ctrl.measureFeature('CYLINDER', params);
+    return { content: [{ type: 'text', text: result }] };
+  }
+);
+
+server.tool(
+  'measure_line',
+  '测量直线特征',
+  {
+    name: z.string().describe('特征名称'),
+    x1: z.number().describe('起点 X'),
+    y1: z.number().describe('起点 Y'),
+    z1: z.number().describe('起点 Z'),
+    x2: z.number().describe('终点 X'),
+    y2: z.number().describe('终点 Y'),
+    z2: z.number().describe('终点 Z'),
+    points: z.number().optional().default(2).describe('测量点数'),
+  },
+  async (params) => {
+    const result = ctrl.measureFeature('LINE', params);
+    return { content: [{ type: 'text', text: result }] };
+  }
+);
+
+server.tool(
+  'add_dimension',
+  '添加尺寸评价（DISTANCE=距离, POSITION=位置度, TRUE_POSITION=真位度, FLATNESS=平面度, ROUNDNESS=圆度, ANGLE=角度）',
+  {
+    dim_type: z.enum(['DISTANCE', 'POSITION', 'TRUE_POSITION', 'FLATNESS', 'ROUNDNESS', 'ANGLE']).describe('尺寸类型'),
+    feature1: z.string().describe('第一个特征名称'),
+    feature2: z.string().optional().describe('第二个特征名称（距离、角度需要）'),
+    nominal: z.number().optional().default(0).describe('标称值'),
+    upper_tol: z.number().optional().default(0.1).describe('上公差'),
+    lower_tol: z.number().optional().default(0.1).describe('下公差'),
+  },
+  async (params) => {
+    const result = ctrl.addDimension(
+      params.dim_type, params.feature1, params.feature2,
+      { nominal: params.nominal, upperTol: params.upper_tol, lowerTol: params.lower_tol }
+    );
+    return { content: [{ type: 'text', text: result }] };
+  }
+);
+
+server.tool(
+  'create_alignment',
+  '创建坐标系对齐（找平→旋转→原点）',
+  {
+    name: z.string().optional().default('A1').describe('对齐名称'),
+    level_feature: z.string().optional().describe('找平特征（通常为平面）'),
+    rotate_feature: z.string().optional().describe('旋转特征（通常为线或圆）'),
+    origin_feature: z.string().optional().describe('原点特征（通常为圆或点）'),
+  },
+  async (params) => {
+    const result = ctrl.createAlignment(
+      params.name, params.level_feature,
+      params.rotate_feature, params.origin_feature
+    );
+    return { content: [{ type: 'text', text: result }] };
+  }
+);
+
+server.tool(
+  'run_program',
+  '运行当前零件程序（执行所有已添加的测量命令）',
+  {},
+  async () => {
+    const result = ctrl.runProgram();
+    return { content: [{ type: 'text', text: result }] };
+  }
+);
+
+server.tool(
+  'add_raw_command',
+  '直接添加原始 PC-DMIS 命令文本',
+  {
+    command: z.string().describe('PC-DMIS 命令文本'),
+  },
+  async ({ command }) => {
+    const result = ctrl.addCommand(command);
+    return { content: [{ type: 'text', text: result }] };
+  }
+);
+
+// --- 资源注册 ---
+
+server.resource(
+  'pc-dmis-status',
+  'pc-dmis://status',
+  async (uri) => ({
+    contents: [{
+      uri: uri.href,
+      text: JSON.stringify(ctrl.getStatus(), null, 2),
+      mimeType: 'application/json',
+    }]
+  })
+);
+
+// ============================================================
+// 入口
+// ============================================================
+
+async function runStdio() {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error('[pc-dmis-mcp] stdio 模式已启动');
+}
+
+async function runSSE(port) {
+  // 简单的 SSE HTTP 服务器
+  let transport = null;
+
+  const app = http.createServer(async (req, res) => {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+
+    if (url.pathname === '/sse') {
+      transport = new SSEServerTransport('/messages/', res);
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+      });
+      await server.connect(transport);
+      return;
+    }
+
+    if (url.pathname === '/messages/' && req.method === 'POST') {
+      if (transport) {
+        await transport.handlePostMessage(req, res);
+      } else {
+        res.writeHead(404);
+        res.end('No active SSE connection');
+      }
+      return;
+    }
+
+    // Health check
+    if (url.pathname === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', server: 'pc-dmis-server' }));
+      return;
+    }
+
+    res.writeHead(404);
+    res.end('Not Found');
+  });
+
+  app.listen(port, '127.0.0.1', () => {
+    console.error(`[pc-dmis-mcp] SSE 模式已启动，端口 ${port}`);
+  });
+}
+
+// 主入口
+const args = process.argv.slice(2);
+if (args[0] === '--sse') {
+  const port = parseInt(args[1]) || 8765;
+  runSSE(port);
+} else {
+  runStdio();
+}

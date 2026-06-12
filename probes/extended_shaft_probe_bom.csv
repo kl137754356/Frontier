@@ -1,0 +1,13 @@
+seq,item_no,description,qty,manufacturer,part_no,material,thread,length_mm,dia_mm,mass_g,unit_price_usd,supplier,notes
+1,1,TP200 测头模块,1,Renishaw,A-1207-0061,Strain-gauge triggering,—,—,—,28,4200,Renishaw/授权代理,含 TP200B 接口模块
+2,2,M8 PHE 自锁螺纹接口,1,Renishaw,A-1048-7568,Stainless,—,M8,—,—,—,Renishaw,随 TP200 配置
+3,3,陶瓷加长杆,1,Renishaw,A-1054-0632,ZTA ceramic,—,100,11,32,180,Renishaw,M5/M8 端接口
+4,4,M5-M8 转接头（可选）,1,Renishaw,A-1054-7561,Titanium,M5→M8,8,11,4,35,Renishaw,如加长杆 M5 端需转 M8 cube
+5,5,M8 转 M3 cube 连接件,1,Renishaw,M-2275-2060,Titanium,M8→M3,12,12,7,120,Renishaw,4 面 M3 螺纹
+6,6,M3 红宝石球测针 L30,1,Renishaw,A-5003-7553,Ruby ball + Ti stem,M3,30,3,2,75,Renishaw,球径 4mm
+7,7,标准标定球 Ø25mm,1,Renishaw,A-1034-6000,Steel,—,—,25,—,420,Renishaw,含磁性座
+8,8,标定环规 Ø30mm,1,Renishaw,A-1097-0260,Steel ring gage,—,—,30,—,380,Renishaw,深孔挠度标定
+9,9,标定杆适配器,1,Renishaw,A-1054-0370,Stainless,M5,40,8,12,45,Renishaw,环规标定时夹持
+10,10,扭矩扳手 0.5-5 N·m,1,Norbar,—,—,—,—,—,1,280,Norbar,M3/M5 紧固
+11,11,探针清洁布（无纤维）,10,—,—,Microfiber,—,—,—,—,5,—,装/拆前擦拭
+12,12,装配手套（防指纹）,2,—,—,Nitrile,—,—,—,—,2,—,避免皮肤油脂污染红宝石球

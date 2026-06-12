@@ -3885,7 +3885,7 @@ ear], /color [scheme], /effort [low|medium|high], /fast, /summary, /tag [label],
      - `rust/crates/rusty-claude-cli/src/main.rs:524-538` — the `-p` branch:
        ```rust
        "-p" => {
-           // Claw Code compat: -p "prompt" = one-shot prompt
+           // Frontier compat: -p "prompt" = one-shot prompt
            let prompt = args[index + 1..].join(" ");
            if prompt.trim().is_empty() {
                return Err("-p requires a prompt string".to_string());

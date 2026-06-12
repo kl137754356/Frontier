@@ -1,0 +1,4 @@
+LLM_PROVIDER="openai"
+OPENAI_API_KEY="sk-FmvSMNZlHj7YZHtCZhjC3fagHyUSlMX6GZkZt3CUERd2jTkQ"
+OPENAI_BASE_URL="https://api.hexai.top/v1"
+OPENAI_MODEL="openai/MiniMax-M2.5"

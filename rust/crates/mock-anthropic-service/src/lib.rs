@@ -1,3 +1,9 @@
+// ============================================================
+// Mock Anthropic 服务模块 (Mock Anthropic Service Module)
+// ============================================================
+// 提供模拟 Anthropic API 服务端实现，用于测试和端到端测试场景
+// 支持多种测试场景的响应模拟，包括流式文本、文件操作、工具调用等
+
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
@@ -10,31 +16,51 @@ use tokio::net::TcpListener;
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
 
-pub const SCENARIO_PREFIX: &str = "PARITY_SCENARIO:";
-pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+// 常量定义
+pub const SCENARIO_PREFIX: &str = "PARITY_SCENARIO:";  // 场景标识前缀
+pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";    // 默认模型名称
+
+// ============================================================
+// 捕获的请求 (Captured Request)
+// ============================================================
+// 记录服务端接收到的请求信息，用于测试验证
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedRequest {
-    pub method: String,
-    pub path: String,
-    pub headers: HashMap<String, String>,
-    pub scenario: String,
-    pub stream: bool,
-    pub raw_body: String,
+    pub method: String,              // HTTP 方法
+    pub path: String,                // 请求路径
+    pub headers: HashMap<String, String>, // 请求头
+    pub scenario: String,            // 场景标识
+    pub stream: bool,                // 是否流式
+    pub raw_body: String,            // 原始请求体
 }
 
+// ============================================================
+// Mock Anthropic 服务 (Mock Anthropic Service)
+// ============================================================
+// 模拟 Anthropic API 的服务端实现
+// 在随机端口监听，接收请求并返回模拟响应
+
 pub struct MockAnthropicService {
-    base_url: String,
-    requests: Arc<Mutex<Vec<CapturedRequest>>>,
-    shutdown: Option<oneshot::Sender<()>>,
-    join_handle: JoinHandle<()>,
+    base_url: String,                              // 服务基础 URL
+    requests: Arc<Mutex<Vec<CapturedRequest>>>,   // 捕获的请求列表
+    shutdown: Option<oneshot::Sender<()>>,         // 关闭信号发送器
+    join_handle: JoinHandle<()>,                   // 任务句柄
 }
 
 impl MockAnthropicService {
+    /// 在随机端口启动服务
+    /// # 返回值
+    /// 成功返回服务实例，失败返回 IO 错误
     pub async fn spawn() -> io::Result<Self> {
         Self::spawn_on("127.0.0.1:0").await
     }
 
+    /// 在指定地址启动服务
+    /// # 参数
+    /// - bind_addr: 绑定地址
+    /// # 返回值
+    /// 成功返回服务实例，失败返回 IO 错误
     pub async fn spawn_on(bind_addr: &str) -> io::Result<Self> {
         let listener = TcpListener::bind(bind_addr).await?;
         let address = listener.local_addr()?;
@@ -42,10 +68,11 @@ impl MockAnthropicService {
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         let request_state = Arc::clone(&requests);
 
+        // 启动异步任务处理连接
         let join_handle = tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    _ = &mut shutdown_rx => break,
+                    _ = &mut shutdown_rx => break,  // 收到关闭信号
                     accepted = listener.accept() => {
                         let Ok((socket, _)) = accepted else {
                             break;
@@ -67,16 +94,19 @@ impl MockAnthropicService {
         })
     }
 
+    /// 获取服务基础 URL
     #[must_use]
     pub fn base_url(&self) -> String {
         self.base_url.clone()
     }
 
+    /// 获取所有捕获的请求
     pub async fn captured_requests(&self) -> Vec<CapturedRequest> {
         self.requests.lock().await.clone()
     }
 }
 
+// 服务析构时自动关闭
 impl Drop for MockAnthropicService {
     fn drop(&mut self) {
         if let Some(shutdown) = self.shutdown.take() {
@@ -86,23 +116,33 @@ impl Drop for MockAnthropicService {
     }
 }
 
+// ============================================================
+// 测试场景枚举 (Scenario Enum)
+// ============================================================
+// 定义支持的测试场景类型，每个场景对应不同的响应行为
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scenario {
-    StreamingText,
-    ReadFileRoundtrip,
-    GrepChunkAssembly,
-    WriteFileAllowed,
-    WriteFileDenied,
-    MultiToolTurnRoundtrip,
-    BashStdoutRoundtrip,
-    BashPermissionPromptApproved,
-    BashPermissionPromptDenied,
-    PluginToolRoundtrip,
-    AutoCompactTriggered,
-    TokenCostReporting,
+    StreamingText,                    // 流式文本响应
+    ReadFileRoundtrip,                // 读取文件往返
+    GrepChunkAssembly,                // Grep 分块组装
+    WriteFileAllowed,                 // 写入文件（允许）
+    WriteFileDenied,                  // 写入文件（拒绝）
+    MultiToolTurnRoundtrip,           // 多工具轮次往返
+    BashStdoutRoundtrip,              // Bash 标准输出往返
+    BashPermissionPromptApproved,     // Bash 权限提示（批准）
+    BashPermissionPromptDenied,       // Bash 权限提示（拒绝）
+    PluginToolRoundtrip,              // 插件工具往返
+    AutoCompactTriggered,             // 自动压缩触发
+    TokenCostReporting,               // Token 成本报告
 }
 
 impl Scenario {
+    /// 解析场景字符串
+    /// # 参数
+    /// - value: 场景名称字符串
+    /// # 返回值
+    /// 解析成功返回 Some(Scenario)，失败返回 None
     fn parse(value: &str) -> Option<Self> {
         match value.trim() {
             "streaming_text" => Some(Self::StreamingText),
@@ -121,6 +161,7 @@ impl Scenario {
         }
     }
 
+    /// 获取场景名称
     fn name(self) -> &'static str {
         match self {
             Self::StreamingText => "streaming_text",

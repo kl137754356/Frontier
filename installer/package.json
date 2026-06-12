@@ -1,0 +1,16 @@
+{
+  "name": "frontier-desktop",
+  "version": "1.0.0",
+  "description": "Frontier AI Chat - Desktop Application",
+  "main": "main.js",
+  "scripts": {
+    "start": "node main.js",
+    "build": "node scripts/build.js",
+    "dist:win": "node scripts/make-installer.js"
+  },
+  "author": "Frontier Team",
+  "license": "MIT",
+  "devDependencies": {
+    "archiver": "^7.0.0"
+  }
+}

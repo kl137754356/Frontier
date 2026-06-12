@@ -1,8 +1,15 @@
+// ============================================================
+// Frontier - 输入处理模块
+// 文件位置：rust/crates/rusty-claude-cli/src/input.rs
+// 功能：REPL 输入处理、命令补全、历史记录
+// ============================================================
+
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::io::{self, IsTerminal, Write};
 
+// Rustyline - Rust 实现的可交互行编辑器
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::{CmdKind, Highlighter};
@@ -13,19 +20,22 @@ use rustyline::{
     Cmd, CompletionType, Config, Context, EditMode, Editor, Helper, KeyCode, KeyEvent, Modifiers,
 };
 
+/// 读取结果 - 用户输入的处理结果
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadOutcome {
-    Submit(String),
-    Cancel,
-    Exit,
+    Submit(String),  // 提交输入内容
+    Cancel,          // 取消输入
+    Exit,            // 退出 REPL
 }
 
+/// 斜杠命令补全助手 - 用于命令自动补全
 struct SlashCommandHelper {
-    completions: Vec<String>,
-    current_line: RefCell<String>,
+    completions: Vec<String>,         // 可用的补全项列表
+    current_line: RefCell<String>,    // 当前输入行
 }
 
 impl SlashCommandHelper {
+    /// 创建新的补全助手
     fn new(completions: Vec<String>) -> Self {
         Self {
             completions: normalize_completions(completions),
@@ -33,38 +43,46 @@ impl SlashCommandHelper {
         }
     }
 
+    /// 重置当前行
     fn reset_current_line(&self) {
         self.current_line.borrow_mut().clear();
     }
 
+    /// 获取当前行内容
     fn current_line(&self) -> String {
         self.current_line.borrow().clone()
     }
 
+    /// 设置当前行内容
     fn set_current_line(&self, line: &str) {
         let mut current = self.current_line.borrow_mut();
         current.clear();
         current.push_str(line);
     }
 
+    /// 更新补全列表
     fn set_completions(&mut self, completions: Vec<String>) {
         self.completions = normalize_completions(completions);
     }
 }
 
+/// 实现 Completer trait - 提供命令补全功能
 impl Completer for SlashCommandHelper {
     type Candidate = Pair;
 
+    /// 执行自动补全
     fn complete(
         &self,
-        line: &str,
-        pos: usize,
-        _ctx: &Context<'_>,
+        line: &str,           // 当前输入行
+        pos: usize,            // 光标位置
+        _ctx: &Context<'_>,   // 上下文
     ) -> rustyline::Result<(usize, Vec<Self::Candidate>)> {
+        // 提取斜杠命令前缀
         let Some(prefix) = slash_command_prefix(line, pos) else {
             return Ok((0, Vec::new()));
         };
 
+        // 过滤匹配的命令
         let matches = self
             .completions
             .iter()

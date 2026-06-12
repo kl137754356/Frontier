@@ -40,7 +40,21 @@ fn is_binary_file(path: &Path) -> io::Result<bool> {
 /// the workspace boundary (e.g. via `../` traversal or symlink).
 #[allow(dead_code)]
 fn validate_workspace_boundary(resolved: &Path, workspace_root: &Path) -> io::Result<()> {
-    if !resolved.starts_with(workspace_root) {
+    // Windows 上 canonicalize() 可能返回 \\?\ 前缀的扩展路径，
+    // 而 current_dir() 返回不带前缀的路径，导致 starts_with 比较失败。
+    // 统一去掉 \\?\ 前缀后再比较。
+    let strip_prefix = |p: &Path| -> PathBuf {
+        let s = p.to_string_lossy();
+        if s.starts_with(r"\\?\") {
+            PathBuf::from(&s[4..])
+        } else {
+            p.to_path_buf()
+        }
+    };
+    let normalized_resolved = strip_prefix(resolved);
+    let normalized_root = strip_prefix(workspace_root);
+
+    if !normalized_resolved.starts_with(&normalized_root) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(

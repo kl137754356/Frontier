@@ -1,3 +1,9 @@
+// ============================================================
+// 插件模块 (Plugins Module)
+// =========================================================
+// 提供插件系统的核心功能，包括插件加载、注册、生命周期管理和工具执行
+// 插件系统支持内置插件、捆绑插件和外部插件三种类型
+
 mod hooks;
 #[cfg(test)]
 pub mod test_isolation;
@@ -15,20 +21,29 @@ use serde_json::{Map, Value};
 
 pub use hooks::{HookEvent, HookRunResult, HookRunner};
 
-const EXTERNAL_MARKETPLACE: &str = "external";
-const BUILTIN_MARKETPLACE: &str = "builtin";
-const BUNDLED_MARKETPLACE: &str = "bundled";
-const SETTINGS_FILE_NAME: &str = "settings.json";
-const REGISTRY_FILE_NAME: &str = "installed.json";
-const MANIFEST_FILE_NAME: &str = "plugin.json";
-const MANIFEST_RELATIVE_PATH: &str = ".claude-plugin/plugin.json";
+// 插件市场常量定义
+const EXTERNAL_MARKETPLACE: &str = "external";      // 外部插件市场
+const BUILTIN_MARKETPLACE: &str = "builtin";        // 内置插件市场
+const BUNDLED_MARKETPLACE: &str = "bundled";        // 捆绑插件市场
+const SETTINGS_FILE_NAME: &str = "settings.json";   // 插件设置文件名
+const REGISTRY_FILE_NAME: &str = "installed.json";  // 已安装插件注册表文件名
+const MANIFEST_FILE_NAME: &str = "plugin.json";     // 插件清单文件名
+const MANIFEST_RELATIVE_PATH: &str = ".claude-plugin/plugin.json";  // 插件清单相对路径
+
+// ============================================================
+// 插件类型枚举 (Plugin Kind Enum)
+// ============================================================
+// 定义插件的三种类型：内置、捆绑和外部
+// - Builtin: 随主程序内置的插件
+// - Bundled: 随应用捆绑分发的插件
+// - External: 用户安装的外部插件
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PluginKind {
-    Builtin,
-    Bundled,
-    External,
+    Builtin,   // 内置插件
+    Bundled,   // 捆绑插件
+    External,  // 外部插件
 }
 
 impl Display for PluginKind {
@@ -42,6 +57,9 @@ impl Display for PluginKind {
 }
 
 impl PluginKind {
+    /// 获取插件对应的市场类型名称
+    /// # 返回值
+    /// 返回市场类型的字符串引用
     #[must_use]
     fn marketplace(self) -> &'static str {
         match self {
@@ -52,29 +70,43 @@ impl PluginKind {
     }
 }
 
+// ============================================================
+// 插件元数据 (Plugin Metadata)
+// ============================================================
+// 存储插件的基本信息，包括标识符、名称、版本、描述等
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginMetadata {
-    pub id: String,
-    pub name: String,
-    pub version: String,
-    pub description: String,
-    pub kind: PluginKind,
-    pub source: String,
-    pub default_enabled: bool,
-    pub root: Option<PathBuf>,
+    pub id: String,              // 插件唯一标识符
+    pub name: String,            // 插件显示名称
+    pub version: String,         // 插件版本号
+    pub description: String,     // 插件功能描述
+    pub kind: PluginKind,        // 插件类型
+    pub source: String,          // 插件来源
+    pub default_enabled: bool,   // 默认是否启用
+    pub root: Option<PathBuf>,   // 插件根目录路径
 }
+
+// ============================================================
+// 插件钩子配置 (Plugin Hooks)
+// ============================================================
+// 定义插件支持的钩子事件类型和对应的处理脚本
+// 钩子用于在工具使用前后执行自定义逻辑
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginHooks {
     #[serde(rename = "PreToolUse", default)]
-    pub pre_tool_use: Vec<String>,
+    pub pre_tool_use: Vec<String>,           // 工具使用前执行的钩子列表
     #[serde(rename = "PostToolUse", default)]
-    pub post_tool_use: Vec<String>,
+    pub post_tool_use: Vec<String>,          // 工具使用后执行的钩子列表
     #[serde(rename = "PostToolUseFailure", default)]
-    pub post_tool_use_failure: Vec<String>,
+    pub post_tool_use_failure: Vec<String>,  // 工具使用失败后执行的钩子列表
 }
 
 impl PluginHooks {
+    /// 检查钩子配置是否为空
+    /// # 返回值
+    /// 如果所有钩子列表都为空则返回 true
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.pre_tool_use.is_empty()
@@ -82,6 +114,11 @@ impl PluginHooks {
             && self.post_tool_use_failure.is_empty()
     }
 
+    /// 合并两个钩子配置
+    /// # 参数
+    /// - other: 要合并的另一个钩子配置
+    /// # 返回值
+    /// 合并后的新钩子配置
     #[must_use]
     pub fn merged_with(&self, other: &Self) -> Self {
         let mut merged = self.clone();
@@ -98,48 +135,66 @@ impl PluginHooks {
     }
 }
 
+// ============================================================
+// 插件生命周期配置 (Plugin Lifecycle)
+// ============================================================
+// 定义插件的初始化和关闭生命周期钩子
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginLifecycle {
     #[serde(rename = "Init", default)]
-    pub init: Vec<String>,
+    pub init: Vec<String>,      // 插件初始化时执行的命令列表
     #[serde(rename = "Shutdown", default)]
-    pub shutdown: Vec<String>,
+    pub shutdown: Vec<String>,  // 插件关闭时执行的命令列表
 }
 
 impl PluginLifecycle {
+    /// 检查生命周期配置是否为空
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.init.is_empty() && self.shutdown.is_empty()
     }
 }
 
+// ============================================================
+// 插件清单 (Plugin Manifest)
+// ============================================================
+// 插件的完整清单定义，包含所有插件元数据和配置
+// 这是插件配置文件 plugin.json 的结构化表示
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PluginManifest {
-    pub name: String,
-    pub version: String,
-    pub description: String,
-    pub permissions: Vec<PluginPermission>,
+    pub name: String,                       // 插件名称
+    pub version: String,                    // 插件版本
+    pub description: String,                // 插件描述
+    pub permissions: Vec<PluginPermission>, // 插件权限列表
     #[serde(rename = "defaultEnabled", default)]
-    pub default_enabled: bool,
+    pub default_enabled: bool,              // 默认启用状态
     #[serde(default)]
-    pub hooks: PluginHooks,
+    pub hooks: PluginHooks,                 // 钩子配置
     #[serde(default)]
-    pub lifecycle: PluginLifecycle,
+    pub lifecycle: PluginLifecycle,         // 生命周期配置
     #[serde(default)]
-    pub tools: Vec<PluginToolManifest>,
+    pub tools: Vec<PluginToolManifest>,     // 插件工具列表
     #[serde(default)]
-    pub commands: Vec<PluginCommandManifest>,
+    pub commands: Vec<PluginCommandManifest>, // 插件命令列表
 }
+
+// ============================================================
+// 插件权限 (Plugin Permission)
+// ============================================================
+// 定义插件可以请求的三种权限级别
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PluginPermission {
-    Read,
-    Write,
-    Execute,
+    Read,     // 读取权限
+    Write,    // 写入权限
+    Execute,  // 执行权限
 }
 
 impl PluginPermission {
+    /// 将权限转换为字符串表示
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -149,6 +204,11 @@ impl PluginPermission {
         }
     }
 
+    /// 解析字符串为权限类型
+    /// # 参数
+    /// - value: 权限的字符串表示
+    /// # 返回值
+    /// 如果解析成功返回 Some(PluginPermission)，否则返回 None
     fn parse(value: &str) -> Option<Self> {
         match value {
             "read" => Some(Self::Read),
@@ -165,27 +225,38 @@ impl AsRef<str> for PluginPermission {
     }
 }
 
+// ============================================================
+// 插件工具清单 (Plugin Tool Manifest)
+// ============================================================
+// 定义插件中工具的元数据，用于描述工具的名称、描述和输入模式
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PluginToolManifest {
-    pub name: String,
-    pub description: String,
+    pub name: String,                           // 工具名称
+    pub description: String,                    // 工具功能描述
     #[serde(rename = "inputSchema")]
-    pub input_schema: Value,
-    pub command: String,
+    pub input_schema: Value,                    // 工具输入参数的 JSON Schema
+    pub command: String,                        // 工具执行的命令
     #[serde(default)]
-    pub args: Vec<String>,
-    pub required_permission: PluginToolPermission,
+    pub args: Vec<String>,                      // 命令附加参数
+    pub required_permission: PluginToolPermission, // 工具所需的权限级别
 }
+
+// ============================================================
+// 插件工具权限 (Plugin Tool Permission)
+// ============================================================
+// 定义插件工具的权限级别，控制工具可以访问的资源范围
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PluginToolPermission {
-    ReadOnly,
-    WorkspaceWrite,
-    DangerFullAccess,
+    ReadOnly,           // 只读权限，只能读取文件/数据
+    WorkspaceWrite,     // 工作区写入权限，可以修改工作区文件
+    DangerFullAccess,   // 完整访问权限，可以执行任意操作
 }
 
 impl PluginToolPermission {
+    /// 将权限级别转换为字符串表示
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -195,6 +266,11 @@ impl PluginToolPermission {
         }
     }
 
+    /// 解析字符串为权限级别
+    /// # 参数
+    /// - value: 权限级别的字符串表示
+    /// # 返回值
+    /// 如果解析成功返回 Some(PluginToolPermission)，否则返回 None
     fn parse(value: &str) -> Option<Self> {
         match value {
             "read-only" => Some(Self::ReadOnly),
@@ -205,21 +281,36 @@ impl PluginToolPermission {
     }
 }
 
+// ============================================================
+// 插件工具定义 (Plugin Tool Definition)
+// ============================================================
+// 插件工具的运行时定义，包含工具的名称、描述和输入模式
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PluginToolDefinition {
-    pub name: String,
+    pub name: String,                           // 工具名称
     #[serde(default)]
-    pub description: Option<String>,
+    pub description: Option<String>,            // 工具描述（可选）
     #[serde(rename = "inputSchema")]
-    pub input_schema: Value,
+    pub input_schema: Value,                    // 输入模式定义
 }
+
+// ============================================================
+// 插件命令清单 (Plugin Command Manifest)
+// ============================================================
+// 定义插件提供的命令的元数据
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginCommandManifest {
-    pub name: String,
-    pub description: String,
-    pub command: String,
+    pub name: String,        // 命令名称
+    pub description: String, // 命令描述
+    pub command: String,     // 命令实现
 }
+
+// ============================================================
+// 原始插件清单 (Raw Plugin Manifest)
+// ============================================================
+// 从 JSON 文件解析的原始插件清单结构，用于验证和转换
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct RawPluginManifest {
@@ -240,6 +331,11 @@ struct RawPluginManifest {
     pub commands: Vec<PluginCommandManifest>,
 }
 
+// ============================================================
+// 原始插件工具清单 (Raw Plugin Tool Manifest)
+// ============================================================
+// 从 JSON 文件解析的原始工具清单结构
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct RawPluginToolManifest {
     pub name: String,
@@ -256,18 +352,33 @@ struct RawPluginToolManifest {
     pub required_permission: String,
 }
 
+// ============================================================
+// 插件工具 (Plugin Tool)
+// ============================================================
+// 插件工具的运行时表示，包含工具定义和执行逻辑
+// 工具通过子进程方式执行，通过环境变量传递输入数据
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PluginTool {
-    plugin_id: String,
-    plugin_name: String,
-    definition: PluginToolDefinition,
-    command: String,
-    args: Vec<String>,
-    required_permission: PluginToolPermission,
-    root: Option<PathBuf>,
+    plugin_id: String,                          // 所属插件的标识符
+    plugin_name: String,                        // 所属插件的名称
+    definition: PluginToolDefinition,           // 工具定义
+    command: String,                            // 可执行命令
+    args: Vec<String>,                          // 命令参数
+    required_permission: PluginToolPermission,  // 所需权限
+    root: Option<PathBuf>,                      // 插件根目录
 }
 
 impl PluginTool {
+    /// 创建新的插件工具实例
+    /// # 参数
+    /// - plugin_id: 插件标识符
+    /// - plugin_name: 插件名称
+    /// - definition: 工具定义
+    /// - command: 可执行命令路径
+    /// - args: 命令参数列表
+    /// - required_permission: 所需权限级别
+    /// - root: 插件根目录路径
     #[must_use]
     pub fn new(
         plugin_id: impl Into<String>,
@@ -289,21 +400,29 @@ impl PluginTool {
         }
     }
 
+    /// 获取插件标识符
     #[must_use]
     pub fn plugin_id(&self) -> &str {
         &self.plugin_id
     }
 
+    /// 获取工具定义
     #[must_use]
     pub fn definition(&self) -> &PluginToolDefinition {
         &self.definition
     }
 
+    /// 获取所需权限的字符串表示
     #[must_use]
     pub fn required_permission(&self) -> &str {
         self.required_permission.as_str()
     }
 
+    /// 执行插件工具
+    /// # 参数
+    /// - input: 工具输入参数（JSON 格式）
+    /// # 返回值
+    /// 工具执行结果（成功返回输出字符串，失败返回错误）
     pub fn execute(&self, input: &Value) -> Result<String, PluginError> {
         let input_json = input.to_string();
         let mut process = Command::new(&self.command);
@@ -348,81 +467,128 @@ impl PluginTool {
     }
 }
 
+/// 返回默认工具权限标签
 fn default_tool_permission_label() -> String {
     "danger-full-access".to_string()
 }
 
+// ============================================================
+// 插件安装来源 (Plugin Install Source)
+// ============================================================
+// 定义插件的安装来源类型，支持本地路径和 Git URL 两种方式
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PluginInstallSource {
-    LocalPath { path: PathBuf },
-    GitUrl { url: String },
+    LocalPath { path: PathBuf },  // 本地路径安装
+    GitUrl { url: String },       // Git URL 安装
 }
+
+// ============================================================
+// 已安装插件记录 (Installed Plugin Record)
+// ============================================================
+// 存储已安装插件的详细信息，用于插件注册表管理
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstalledPluginRecord {
     #[serde(default = "default_plugin_kind")]
-    pub kind: PluginKind,
-    pub id: String,
-    pub name: String,
-    pub version: String,
-    pub description: String,
-    pub install_path: PathBuf,
-    pub source: PluginInstallSource,
-    pub installed_at_unix_ms: u128,
-    pub updated_at_unix_ms: u128,
+    pub kind: PluginKind,                     // 插件类型
+    pub id: String,                           // 插件标识符
+    pub name: String,                         // 插件名称
+    pub version: String,                      // 插件版本
+    pub description: String,                  // 插件描述
+    pub install_path: PathBuf,                // 安装路径
+    pub source: PluginInstallSource,          // 安装来源
+    pub installed_at_unix_ms: u128,           // 安装时间（毫秒时间戳）
+    pub updated_at_unix_ms: u128,             // 更新时间（毫秒时间戳）
 }
+
+// ============================================================
+// 已安装插件注册表 (Installed Plugin Registry)
+// ============================================================
+// 管理所有已安装插件的注册表，使用标识符索引
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstalledPluginRegistry {
     #[serde(default)]
-    pub plugins: BTreeMap<String, InstalledPluginRecord>,
+    pub plugins: BTreeMap<String, InstalledPluginRecord>,  // 插件记录映射
 }
 
+/// 返回默认插件类型
 fn default_plugin_kind() -> PluginKind {
     PluginKind::External
 }
 
+// ============================================================
+// 插件类型结构体 (Plugin Type Structs)
+// ============================================================
+// 三种插件类型的运行时表示，包含元数据、钩子、生命周期和工具
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct BuiltinPlugin {
-    metadata: PluginMetadata,
-    hooks: PluginHooks,
-    lifecycle: PluginLifecycle,
-    tools: Vec<PluginTool>,
+    metadata: PluginMetadata,       // 插件元数据
+    hooks: PluginHooks,             // 钩子配置
+    lifecycle: PluginLifecycle,     // 生命周期配置
+    tools: Vec<PluginTool>,         // 插件工具列表
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BundledPlugin {
-    metadata: PluginMetadata,
-    hooks: PluginHooks,
-    lifecycle: PluginLifecycle,
-    tools: Vec<PluginTool>,
+    metadata: PluginMetadata,       // 插件元数据
+    hooks: PluginHooks,             // 钩子配置
+    lifecycle: PluginLifecycle,     // 生命周期配置
+    tools: Vec<PluginTool>,         // 插件工具列表
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExternalPlugin {
-    metadata: PluginMetadata,
-    hooks: PluginHooks,
-    lifecycle: PluginLifecycle,
-    tools: Vec<PluginTool>,
+    metadata: PluginMetadata,       // 插件元数据
+    hooks: PluginHooks,             // 钩子配置
+    lifecycle: PluginLifecycle,     // 生命周期配置
+    tools: Vec<PluginTool>,         // 插件工具列表
 }
 
+// ============================================================
+// 插件 trait (Plugin Trait)
+// ============================================================
+// 定义插件的通用接口，所有插件类型都需要实现此 trait
+// 提供了访问插件元数据、钩子、生命周期和工具的方法
+// 以及验证、初始化和关闭的生命周期方法
+
 pub trait Plugin {
+    /// 获取插件元数据
     fn metadata(&self) -> &PluginMetadata;
+    /// 获取钩子配置
     fn hooks(&self) -> &PluginHooks;
+    /// 获取生命周期配置
     fn lifecycle(&self) -> &PluginLifecycle;
+    /// 获取插件工具列表
     fn tools(&self) -> &[PluginTool];
+    /// 验证插件配置
     fn validate(&self) -> Result<(), PluginError>;
+    /// 初始化插件
     fn initialize(&self) -> Result<(), PluginError>;
+    /// 关闭插件
     fn shutdown(&self) -> Result<(), PluginError>;
 }
 
+// ============================================================
+// 插件定义 (Plugin Definition)
+// ============================================================
+// 插件定义的枚举类型，可以是内置、捆绑或外部插件之一
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum PluginDefinition {
-    Builtin(BuiltinPlugin),
-    Bundled(BundledPlugin),
-    External(ExternalPlugin),
+    Builtin(BuiltinPlugin),    // 内置插件
+    Bundled(BundledPlugin),    // 捆绑插件
+    External(ExternalPlugin),  // 外部插件
 }
+
+// ============================================================
+// BuiltinPlugin 实现 (BuiltinPlugin Implementation)
+// ============================================================
+// 内置插件的 Plugin trait 实现
+// 内置插件不需要验证路径和执行生命周期命令，因为它们是系统内置的
 
 impl Plugin for BuiltinPlugin {
     fn metadata(&self) -> &PluginMetadata {
@@ -442,17 +608,26 @@ impl Plugin for BuiltinPlugin {
     }
 
     fn validate(&self) -> Result<(), PluginError> {
+        // 内置插件始终有效，无需验证
         Ok(())
     }
 
     fn initialize(&self) -> Result<(), PluginError> {
+        // 内置插件无需初始化
         Ok(())
     }
 
     fn shutdown(&self) -> Result<(), PluginError> {
+        // 内置插件无需关闭
         Ok(())
     }
 }
+
+// ============================================================
+// BundledPlugin 实现 (BundledPlugin Implementation)
+// ============================================================
+// 捆绑插件的 Plugin trait 实现
+// 捆绑插件需要验证路径并执行生命周期命令
 
 impl Plugin for BundledPlugin {
     fn metadata(&self) -> &PluginMetadata {
@@ -472,12 +647,14 @@ impl Plugin for BundledPlugin {
     }
 
     fn validate(&self) -> Result<(), PluginError> {
+        // 验证钩子、生命周期和工具的路径
         validate_hook_paths(self.metadata.root.as_deref(), &self.hooks)?;
         validate_lifecycle_paths(self.metadata.root.as_deref(), &self.lifecycle)?;
         validate_tool_paths(self.metadata.root.as_deref(), &self.tools)
     }
 
     fn initialize(&self) -> Result<(), PluginError> {
+        // 执行初始化生命周期命令
         run_lifecycle_commands(
             self.metadata(),
             self.lifecycle(),
@@ -487,6 +664,7 @@ impl Plugin for BundledPlugin {
     }
 
     fn shutdown(&self) -> Result<(), PluginError> {
+        // 执行关闭生命周期命令
         run_lifecycle_commands(
             self.metadata(),
             self.lifecycle(),
@@ -495,6 +673,12 @@ impl Plugin for BundledPlugin {
         )
     }
 }
+
+// ============================================================
+// ExternalPlugin 实现 (ExternalPlugin Implementation)
+// ============================================================
+// 外部插件的 Plugin trait 实现
+// 外部插件需要验证路径并执行生命周期命令
 
 impl Plugin for ExternalPlugin {
     fn metadata(&self) -> &PluginMetadata {
@@ -514,12 +698,14 @@ impl Plugin for ExternalPlugin {
     }
 
     fn validate(&self) -> Result<(), PluginError> {
+        // 验证钩子、生命周期和工具的路径
         validate_hook_paths(self.metadata.root.as_deref(), &self.hooks)?;
         validate_lifecycle_paths(self.metadata.root.as_deref(), &self.lifecycle)?;
         validate_tool_paths(self.metadata.root.as_deref(), &self.tools)
     }
 
     fn initialize(&self) -> Result<(), PluginError> {
+        // 执行初始化生命周期命令
         run_lifecycle_commands(
             self.metadata(),
             self.lifecycle(),
@@ -529,6 +715,7 @@ impl Plugin for ExternalPlugin {
     }
 
     fn shutdown(&self) -> Result<(), PluginError> {
+        // 执行关闭生命周期命令
         run_lifecycle_commands(
             self.metadata(),
             self.lifecycle(),
@@ -537,6 +724,12 @@ impl Plugin for ExternalPlugin {
         )
     }
 }
+
+// ============================================================
+// PluginDefinition 实现 (PluginDefinition Implementation)
+// ============================================================
+// PluginDefinition 枚举的 Plugin trait 实现
+// 通过模式匹配将方法调用转发到具体的插件类型
 
 impl Plugin for PluginDefinition {
     fn metadata(&self) -> &PluginMetadata {
@@ -596,13 +789,22 @@ impl Plugin for PluginDefinition {
     }
 }
 
+// ============================================================
+// 已注册插件 (Registered Plugin)
+// ============================================================
+// 已注册到系统中的插件，包含插件定义和启用状态
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RegisteredPlugin {
-    definition: PluginDefinition,
-    enabled: bool,
+    definition: PluginDefinition,  // 插件定义
+    enabled: bool,                 // 是否启用
 }
 
 impl RegisteredPlugin {
+    /// 创建新的已注册插件
+    /// # 参数
+    /// - definition: 插件定义
+    /// - enabled: 是否启用
     #[must_use]
     pub fn new(definition: PluginDefinition, enabled: bool) -> Self {
         Self {
@@ -611,38 +813,46 @@ impl RegisteredPlugin {
         }
     }
 
+    /// 获取插件元数据
     #[must_use]
     pub fn metadata(&self) -> &PluginMetadata {
         self.definition.metadata()
     }
 
+    /// 获取插件钩子配置
     #[must_use]
     pub fn hooks(&self) -> &PluginHooks {
         self.definition.hooks()
     }
 
+    /// 获取插件工具列表
     #[must_use]
     pub fn tools(&self) -> &[PluginTool] {
         self.definition.tools()
     }
 
+    /// 检查插件是否已启用
     #[must_use]
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
 
+    /// 验证插件配置
     pub fn validate(&self) -> Result<(), PluginError> {
         self.definition.validate()
     }
 
+    /// 初始化插件
     pub fn initialize(&self) -> Result<(), PluginError> {
         self.definition.initialize()
     }
 
+    /// 关闭插件
     pub fn shutdown(&self) -> Result<(), PluginError> {
         self.definition.shutdown()
     }
 
+    /// 获取插件摘要信息
     #[must_use]
     pub fn summary(&self) -> PluginSummary {
         PluginSummary {
@@ -653,14 +863,22 @@ impl RegisteredPlugin {
     }
 }
 
+// ============================================================
+// 插件摘要 (Plugin Summary)
+// ============================================================
+// 插件的简要信息，用于显示和列表展示
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginSummary {
-    pub metadata: PluginMetadata,
-    pub enabled: bool,
-    pub lifecycle: PluginLifecycle,
+    pub metadata: PluginMetadata,   // 插件元数据
+    pub enabled: bool,              // 是否启用
+    pub lifecycle: PluginLifecycle, // 生命周期配置
 }
 
 impl PluginSummary {
+    /// 获取插件生命周期状态
+    /// # 返回值
+    /// "ready" 表示已启用可使用，"disabled" 表示已禁用
     #[must_use]
     pub fn lifecycle_state(&self) -> &'static str {
         if self.enabled {
@@ -671,15 +889,21 @@ impl PluginSummary {
     }
 }
 
+// ============================================================
+// 插件加载失败 (Plugin Load Failure)
+// ============================================================
+// 记录插件加载失败的信息，包括失败原因和位置
+
 #[derive(Debug)]
 pub struct PluginLoadFailure {
-    pub plugin_root: PathBuf,
-    pub kind: PluginKind,
-    pub source: String,
-    error: Box<PluginError>,
+    pub plugin_root: PathBuf,   // 插件根目录路径
+    pub kind: PluginKind,       // 插件类型
+    pub source: String,         // 插件来源
+    error: Box<PluginError>,    // 错误信息
 }
 
 impl PluginLoadFailure {
+    /// 创建新的插件加载失败记录
     #[must_use]
     pub fn new(plugin_root: PathBuf, kind: PluginKind, source: String, error: PluginError) -> Self {
         Self {
@@ -690,6 +914,7 @@ impl PluginLoadFailure {
         }
     }
 
+    /// 获取错误引用
     #[must_use]
     pub fn error(&self) -> &PluginError {
         self.error.as_ref()
@@ -709,38 +934,51 @@ impl Display for PluginLoadFailure {
     }
 }
 
+// ============================================================
+// 插件注册表报告 (Plugin Registry Report)
+// ============================================================
+// 插件注册表的加载结果报告，包含成功加载的注册表和失败的插件列表
+
 #[derive(Debug)]
 pub struct PluginRegistryReport {
-    registry: PluginRegistry,
-    failures: Vec<PluginLoadFailure>,
+    registry: PluginRegistry,              // 成功加载的插件注册表
+    failures: Vec<PluginLoadFailure>,      // 加载失败的插件列表
 }
 
 impl PluginRegistryReport {
+    /// 创建新的注册表报告
     #[must_use]
     pub fn new(registry: PluginRegistry, failures: Vec<PluginLoadFailure>) -> Self {
         Self { registry, failures }
     }
 
+    /// 获取注册表引用
     #[must_use]
     pub fn registry(&self) -> &PluginRegistry {
         &self.registry
     }
 
+    /// 获取失败列表引用
     #[must_use]
     pub fn failures(&self) -> &[PluginLoadFailure] {
         &self.failures
     }
 
+    /// 检查是否存在失败
     #[must_use]
     pub fn has_failures(&self) -> bool {
         !self.failures.is_empty()
     }
 
+    /// 获取所有插件摘要
     #[must_use]
     pub fn summaries(&self) -> Vec<PluginSummary> {
         self.registry.summaries()
     }
 
+    /// 转换为注册表，如果存在失败则返回错误
+    /// # 返回值
+    /// 成功时返回注册表，失败时返回 PluginError
     pub fn into_registry(self) -> Result<PluginRegistry, PluginError> {
         if self.failures.is_empty() {
             Ok(self.registry)

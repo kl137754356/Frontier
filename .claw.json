@@ -1,5 +1,27 @@
 {
   "aliases": {
     "quick": "haiku"
+  },
+  "mcpServers": {
+    "a2ui": {
+      "type": "stdio",
+      "command": "D:\\Program Files (x86)\\nodejs\\node.exe",
+      "args": [
+        "D:\\AI_LLM\\LLM\\claw-code\\claw-code_Agui\\claw-web-chat\\a2ui\\mcp-server\\index.js"
+      ]
+    },
+    "pcdmis": {
+      "type": "stdio",
+      "command": "K:\\softwareFiles\\WXWork\\1688850439691985\\Cache\\File\\2026-06\\pcdmis-mcp-contentlength.exe",
+      "args": []
+    },
+    "metrology": {
+      "type": "stdio",
+      "command": "K:\\softwareFiles\\WXWork\\1688850439691985\\Cache\\File\\2026-06\\metrology-mcp-contentlength.exe",
+      "args": [],
+      "env": {
+        "METROLOGY_AI_URL": "http://localhost:8780"
+      }
+    }
   }
 }

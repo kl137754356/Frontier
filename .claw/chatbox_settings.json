@@ -1,0 +1,8 @@
+{
+  "provider_index": 1,
+  "api_key_env": "OPENAI_API_KEY",
+  "api_key": "sk-cf08d0075bf24016ae4d05b76ba64f42",
+  "base_url_env": "OPENAI_BASE_URL",
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-v4-flash"
+}

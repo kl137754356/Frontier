@@ -2,4 +2,9 @@
   "permissions": {
     "defaultMode": "dontAsk"
   }
+  "permissions_mode_comment":{
+	  "read-only / default":"只读，不能修改文件",
+	  "workspace-write":"可以修改工作区文件，但敏感操作需确认",
+	  "dontAsk / danger-full-access":"自动允许所有操作，不弹确认框",
+  }
 }

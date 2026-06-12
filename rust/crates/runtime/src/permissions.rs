@@ -1,20 +1,31 @@
+// ============================================================
+// 权限模块 (Permissions Module)
+// ============================================================
+// 提供运行时权限管理功能，包括权限模式、策略评估和权限提示
+// 控制工具调用的授权流程，支持只读、工作区写入和完整访问权限
+
 use std::collections::BTreeMap;
 
 use serde_json::Value;
 
 use crate::config::RuntimePermissionRuleConfig;
 
-/// Permission level assigned to a tool invocation or runtime session.
+// ============================================================
+// 权限模式枚举 (Permission Mode Enum)
+// ============================================================
+// 定义工具调用或运行时会话的权限级别
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PermissionMode {
-    ReadOnly,
-    WorkspaceWrite,
-    DangerFullAccess,
-    Prompt,
-    Allow,
+    ReadOnly,           // 只读权限
+    WorkspaceWrite,     // 工作区写入权限
+    DangerFullAccess,   // 完整访问权限
+    Prompt,             // 需要提示
+    Allow,              // 允许所有
 }
 
 impl PermissionMode {
+    /// 将权限模式转换为字符串表示
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -27,22 +38,34 @@ impl PermissionMode {
     }
 }
 
-/// Hook-provided override applied before standard permission evaluation.
+// ============================================================
+// 权限覆盖枚举 (Permission Override Enum)
+// ============================================================
+// 钩子提供的覆盖决策，在标准权限评估之前应用
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionOverride {
-    Allow,
-    Deny,
-    Ask,
+    Allow,   // 允许
+    Deny,    // 拒绝
+    Ask,     // 询问
 }
 
-/// Additional permission context supplied by hooks or higher-level orchestration.
+// ============================================================
+// 权限上下文 (Permission Context)
+// ============================================================
+// 钩子或高级编排提供的额外权限上下文
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PermissionContext {
-    override_decision: Option<PermissionOverride>,
-    override_reason: Option<String>,
+    override_decision: Option<PermissionOverride>,  // 覆盖决策
+    override_reason: Option<String>,                 // 覆盖原因
 }
 
 impl PermissionContext {
+    /// 创建新的权限上下文
+    /// # 参数
+    /// - override_decision: 覆盖决策
+    /// - override_reason: 覆盖原因
     #[must_use]
     pub fn new(
         override_decision: Option<PermissionOverride>,
@@ -54,57 +77,87 @@ impl PermissionContext {
         }
     }
 
+    /// 获取覆盖决策
     #[must_use]
     pub fn override_decision(&self) -> Option<PermissionOverride> {
         self.override_decision
     }
 
+    /// 获取覆盖原因
     #[must_use]
     pub fn override_reason(&self) -> Option<&str> {
         self.override_reason.as_deref()
     }
 }
 
-/// Full authorization request presented to a permission prompt.
+// ============================================================
+// 权限请求 (Permission Request)
+// ============================================================
+// 呈现给权限提示的完整授权请求
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionRequest {
-    pub tool_name: String,
-    pub input: String,
-    pub current_mode: PermissionMode,
-    pub required_mode: PermissionMode,
-    pub reason: Option<String>,
+    pub tool_name: String,           // 工具名称
+    pub input: String,               // 工具输入
+    pub current_mode: PermissionMode, // 当前权限模式
+    pub required_mode: PermissionMode, // 所需权限模式
+    pub reason: Option<String>,      // 请求原因
 }
 
-/// User-facing decision returned by a [`PermissionPrompter`].
+// ============================================================
+// 权限提示决策 (Permission Prompt Decision)
+// ============================================================
+// 权限提示返回的用户决策
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionPromptDecision {
-    Allow,
-    Deny { reason: String },
+    Allow,                       // 允许
+    Deny { reason: String },     // 拒绝（带原因）
 }
 
-/// Prompting interface used when policy requires interactive approval.
+// ============================================================
+// 权限提示器 trait (Permission Prompter Trait)
+// ============================================================
+// 当策略需要交互式批准时使用的提示接口
+
 pub trait PermissionPrompter {
+    /// 决定是否允许请求
+    /// # 参数
+    /// - request: 权限请求
+    /// # 返回值
+    /// 用户决策
     fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision;
 }
 
-/// Final authorization result after evaluating static rules and prompts.
+// ============================================================
+// 权限结果枚举 (Permission Outcome Enum)
+// ============================================================
+// 评估静态规则和提示后的最终授权结果
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionOutcome {
-    Allow,
-    Deny { reason: String },
+    Allow,                       // 允许
+    Deny { reason: String },     // 拒绝（带原因）
 }
 
-/// Evaluates permission mode requirements plus allow/deny/ask rules.
+// ============================================================
+// 权限策略 (Permission Policy)
+// ============================================================
+// 评估权限模式要求以及允许/拒绝/询问规则
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionPolicy {
-    active_mode: PermissionMode,
-    tool_requirements: BTreeMap<String, PermissionMode>,
-    allow_rules: Vec<PermissionRule>,
-    deny_rules: Vec<PermissionRule>,
-    ask_rules: Vec<PermissionRule>,
+    active_mode: PermissionMode,              // 活动权限模式
+    tool_requirements: BTreeMap<String, PermissionMode>, // 工具要求
+    allow_rules: Vec<PermissionRule>,         // 允许规则
+    deny_rules: Vec<PermissionRule>,          // 拒绝规则
+    ask_rules: Vec<PermissionRule>,           // 询问规则
 }
 
 impl PermissionPolicy {
+    /// 创建新的权限策略
+    /// # 参数
+    /// - active_mode: 活动权限模式
     #[must_use]
     pub fn new(active_mode: PermissionMode) -> Self {
         Self {
@@ -116,6 +169,10 @@ impl PermissionPolicy {
         }
     }
 
+    /// 添加工具权限要求
+    /// # 参数
+    /// - tool_name: 工具名称
+    /// - required_mode: 所需权限模式
     #[must_use]
     pub fn with_tool_requirement(
         mut self,
@@ -127,6 +184,9 @@ impl PermissionPolicy {
         self
     }
 
+    /// 添加权限规则配置
+    /// # 参数
+    /// - config: 运行时权限规则配置
     #[must_use]
     pub fn with_permission_rules(mut self, config: &RuntimePermissionRuleConfig) -> Self {
         self.allow_rules = config
@@ -147,11 +207,17 @@ impl PermissionPolicy {
         self
     }
 
+    /// 获取活动权限模式
     #[must_use]
     pub fn active_mode(&self) -> PermissionMode {
         self.active_mode
     }
 
+    /// 获取工具所需权限模式
+    /// # 参数
+    /// - tool_name: 工具名称
+    /// # 返回值
+    /// 所需权限模式，未指定时默认为完整访问
     #[must_use]
     pub fn required_mode_for(&self, tool_name: &str) -> PermissionMode {
         self.tool_requirements
@@ -160,6 +226,13 @@ impl PermissionPolicy {
             .unwrap_or(PermissionMode::DangerFullAccess)
     }
 
+    /// 授权工具调用
+    /// # 参数
+    /// - tool_name: 工具名称
+    /// - input: 工具输入
+    /// - prompter: 权限提示器（可选）
+    /// # 返回值
+    /// 授权结果
     #[must_use]
     pub fn authorize(
         &self,
@@ -170,6 +243,14 @@ impl PermissionPolicy {
         self.authorize_with_context(tool_name, input, &PermissionContext::default(), prompter)
     }
 
+    /// 使用上下文授权工具调用
+    /// # 参数
+    /// - tool_name: 工具名称
+    /// - input: 工具输入
+    /// - context: 权限上下文
+    /// - prompter: 权限提示器（可选）
+    /// # 返回值
+    /// 授权结果
     #[must_use]
     #[allow(clippy::too_many_lines)]
     pub fn authorize_with_context(
@@ -179,6 +260,7 @@ impl PermissionPolicy {
         context: &PermissionContext,
         prompter: Option<&mut dyn PermissionPrompter>,
     ) -> PermissionOutcome {
+        // 检查拒绝规则
         if let Some(rule) = Self::find_matching_rule(&self.deny_rules, tool_name, input) {
             return PermissionOutcome::Deny {
                 reason: format!(
@@ -193,6 +275,7 @@ impl PermissionPolicy {
         let ask_rule = Self::find_matching_rule(&self.ask_rules, tool_name, input);
         let allow_rule = Self::find_matching_rule(&self.allow_rules, tool_name, input);
 
+        // 处理钩子覆盖决策
         match context.override_decision() {
             Some(PermissionOverride::Deny) => {
                 return PermissionOutcome::Deny {
@@ -241,6 +324,7 @@ impl PermissionPolicy {
             None => {}
         }
 
+        // 检查询问规则
         if let Some(rule) = ask_rule {
             let reason = format!(
                 "tool '{tool_name}' requires approval due to ask rule '{}'",
@@ -256,6 +340,7 @@ impl PermissionPolicy {
             );
         }
 
+        // 检查允许规则或模式匹配
         if allow_rule.is_some()
             || current_mode == PermissionMode::Allow
             || current_mode >= required_mode
@@ -263,6 +348,7 @@ impl PermissionPolicy {
             return PermissionOutcome::Allow;
         }
 
+        // 检查权限升级提示
         if current_mode == PermissionMode::Prompt
             || (current_mode == PermissionMode::WorkspaceWrite
                 && required_mode == PermissionMode::DangerFullAccess)
@@ -282,6 +368,7 @@ impl PermissionPolicy {
             );
         }
 
+        // 默认拒绝
         PermissionOutcome::Deny {
             reason: format!(
                 "tool '{tool_name}' requires {} permission; current mode is {}",
@@ -291,6 +378,7 @@ impl PermissionPolicy {
         }
     }
 
+    /// 提示用户或拒绝
     fn prompt_or_deny(
         tool_name: &str,
         input: &str,
@@ -323,6 +411,7 @@ impl PermissionPolicy {
         }
     }
 
+    /// 在规则列表中查找匹配的规则
     fn find_matching_rule<'a>(
         rules: &'a [PermissionRule],
         tool_name: &str,
@@ -332,26 +421,42 @@ impl PermissionPolicy {
     }
 }
 
+// ============================================================
+// 权限规则 (Permission Rule)
+// ============================================================
+// 表示单个权限规则，包含原始字符串、工具名称和匹配器
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PermissionRule {
-    raw: String,
-    tool_name: String,
-    matcher: PermissionRuleMatcher,
+    raw: String,                   // 原始规则字符串
+    tool_name: String,             // 工具名称
+    matcher: PermissionRuleMatcher, // 匹配器
 }
+
+// ============================================================
+// 权限规则匹配器 (Permission Rule Matcher)
+// ============================================================
+// 定义规则匹配的方式：任意匹配、精确匹配或前缀匹配
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PermissionRuleMatcher {
-    Any,
-    Exact(String),
-    Prefix(String),
+    Any,           // 匹配任意
+    Exact(String), // 精确匹配
+    Prefix(String), // 前缀匹配
 }
 
 impl PermissionRule {
+    /// 解析规则字符串
+    /// # 参数
+    /// - raw: 原始规则字符串
+    /// # 返回值
+    /// 解析后的权限规则
     fn parse(raw: &str) -> Self {
         let trimmed = raw.trim();
         let open = find_first_unescaped(trimmed, '(');
         let close = find_last_unescaped(trimmed, ')');
 
+        // 检查是否包含括号格式：tool_name(content)
         if let (Some(open), Some(close)) = (open, close) {
             if close == trimmed.len() - 1 && open < close {
                 let tool_name = trimmed[..open].trim();
@@ -367,6 +472,7 @@ impl PermissionRule {
             }
         }
 
+        // 无括号格式，工具名称即为规则
         Self {
             raw: trimmed.to_string(),
             tool_name: trimmed.to_string(),
@@ -374,11 +480,19 @@ impl PermissionRule {
         }
     }
 
+    /// 检查规则是否匹配
+    /// # 参数
+    /// - tool_name: 工具名称
+    /// - input: 工具输入
+    /// # 返回值
+    /// 匹配返回 true，否则返回 false
     fn matches(&self, tool_name: &str, input: &str) -> bool {
+        // 首先检查工具名称是否匹配
         if self.tool_name != tool_name {
             return false;
         }
 
+        // 根据匹配器类型进行匹配
         match &self.matcher {
             PermissionRuleMatcher::Any => true,
             PermissionRuleMatcher::Exact(expected) => {
@@ -390,6 +504,15 @@ impl PermissionRule {
     }
 }
 
+// ============================================================
+// 规则解析辅助函数
+// ============================================================
+
+/// 解析规则匹配器内容
+/// # 参数
+/// - content: 规则内容字符串
+/// # 返回值
+/// 权限规则匹配器
 fn parse_rule_matcher(content: &str) -> PermissionRuleMatcher {
     let unescaped = unescape_rule_content(content.trim());
     if unescaped.is_empty() || unescaped == "*" {
@@ -401,6 +524,11 @@ fn parse_rule_matcher(content: &str) -> PermissionRuleMatcher {
     }
 }
 
+/// 转义规则内容
+/// # 参数
+/// - content: 原始内容
+/// # 返回值
+/// 转义后的内容
 fn unescape_rule_content(content: &str) -> String {
     content
         .replace(r"\(", "(")
@@ -408,6 +536,12 @@ fn unescape_rule_content(content: &str) -> String {
         .replace(r"\\", r"\")
 }
 
+/// 查找字符串中第一个未转义的字符位置
+/// # 参数
+/// - value: 输入字符串
+/// - needle: 要查找的字符
+/// # 返回值
+/// 找到返回位置索引，否则返回 None
 fn find_first_unescaped(value: &str, needle: char) -> Option<usize> {
     let mut escaped = false;
     for (idx, ch) in value.char_indices() {
@@ -444,6 +578,13 @@ fn find_last_unescaped(value: &str, needle: char) -> Option<usize> {
     None
 }
 
+/// 从工具输入中提取权限主题
+/// 从 JSON 输入中提取用于权限规则匹配的字段值
+/// 支持的字段包括：command、path、file_path、filePath、notebook_path、notebookPath、url、pattern、code、message
+/// # 参数
+/// - input: 工具输入 JSON 字符串
+/// # 返回值
+/// 提取的主题字符串，提取失败返回 None
 fn extract_permission_subject(input: &str) -> Option<String> {
     let parsed = serde_json::from_str::<Value>(input).ok();
     if let Some(Value::Object(object)) = parsed {

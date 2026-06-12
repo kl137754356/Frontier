@@ -1,0 +1,3 @@
+{"created_at_ms":1779530737052,"model":"openai/deepseek-v4-flash","session_id":"session-1779530737053-0","type":"session_meta","updated_at_ms":1779530739615,"version":1,"workspace_root":"D:\\AI_LLM\\LLM\\claw-code\\claw-code"}
+{"message":{"blocks":[{"text":"say hi in chinese, one sentence only","type":"text"}],"role":"user"},"type":"message"}
+{"message":{"blocks":[{"text":"你好！","type":"text"}],"role":"assistant","usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"input_tokens":61176,"output_tokens":17}},"type":"message"}

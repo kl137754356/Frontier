@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Frontier - A2UI Demo</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+    };
+  </script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+    .text-ui { font-size: 0.8125rem; }
+    .text-content { font-size: 0.875rem; line-height: 1.5; }
+  </style>
+</head>
+<body class="h-screen overflow-hidden bg-gray-900 text-gray-100">
+  <div id="app" class="h-full flex">
+    <!-- Sidebar -->
+    <aside id="sidebar" class="w-56 border-r border-gray-700 bg-gray-800 flex flex-col shrink-0 transition-all duration-200">
+      <div class="px-3 py-3 border-b border-gray-700">
+        <button class="w-full flex items-center gap-2 px-2 py-1.5 rounded text-sm text-gray-300 hover:bg-gray-700 transition-colors">
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
+          </svg>
+          New Chat
+        </button>
+      </div>
+      <div class="flex-1 overflow-y-auto px-2 py-2 space-y-1">
+        <div class="px-2 py-1.5 rounded bg-gray-700 text-sm text-gray-200 truncate">A2UI 选择演示</div>
+        <div class="px-2 py-1.5 rounded text-sm text-gray-400 truncate hover:bg-gray-700/50 cursor-pointer">项目架构讨论</div>
+        <div class="px-2 py-1.5 rounded text-sm text-gray-400 truncate hover:bg-gray-700/50 cursor-pointer">Bug fix: auth flow</div>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <div class="flex-1 flex flex-col overflow-hidden">
+      <!-- Header -->
+      <header class="flex items-center px-3 py-2 border-b border-gray-700 bg-gray-800 shrink-0">
+        <div class="flex items-center gap-2">
+          <span class="text-ui font-semibold text-gray-100">Frontier</span>
+        </div>
+        <div class="flex-1"></div>
+        <div class="flex items-center gap-2">
+          <button class="flex items-center gap-1.5 text-ui text-gray-300 hover:text-gray-100 transition-colors">
+            <span class="inline-block w-2 h-2 rounded-full bg-green-500"></span>
+            <span class="hidden sm:inline">Connected</span>
+          </button>
+          <button onclick="toggleTheme()" class="p-1.5 rounded hover:bg-gray-700 text-gray-300" aria-label="Toggle theme">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+            </svg>
+          </button>
+          <button class="p-1.5 rounded hover:bg-gray-700 text-gray-300" aria-label="Settings">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <!-- Message List -->
+      <div class="flex-1 overflow-y-auto px-4 py-4 space-y-4" id="message-list">
+
+        <!-- User message -->
+        <div class="flex justify-end">
+          <div class="max-w-[80%] px-3 py-2 rounded-lg bg-blue-500 text-white text-content whitespace-pre-wrap">帮我选一个前端框架来重构这个项目</div>
+        </div>
+
+        <!-- Assistant text message -->
+        <div class="flex justify-start">
+          <div class="max-w-[85%] px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-content text-gray-100 whitespace-pre-wrap">好的，我来帮你分析一下。根据你的项目特点，这里有几个适合的前端框架选项，请选择你最感兴趣的：</div>
+        </div>
+
+        <!-- A2UI ChoicePrompt - Single Select -->
+        <div class="flex justify-start">
+          <div class="max-w-[85%] space-y-3">
+            <section class="w-full max-w-2xl rounded-lg border border-gray-700 bg-gray-800 p-4 shadow-sm" id="choice-single">
+              <div class="mb-4">
+                <h2 class="text-base font-semibold text-gray-100">选择前端框架</h2>
+                <p class="mt-1 text-sm leading-6 text-gray-400">根据项目需求和团队经验，推荐以下框架</p>
+              </div>
+              <fieldset class="grid gap-2" id="fieldset-single">
+                <legend class="sr-only">选择前端框架</legend>
+
+                <label class="flex gap-3 rounded-md border p-3 transition cursor-pointer border-gray-600 bg-gray-900 hover:border-gray-500" data-option="react" onclick="selectSingle(this, 'react')">
+                  <input class="mt-1 h-4 w-4 shrink-0 accent-blue-500" type="radio" name="choice-framework" />
+                  <span class="min-w-0">
+                    <span class="block text-sm font-medium text-gray-100">React + Vite</span>
+                    <span class="mt-1 block text-sm leading-5 text-gray-400">成熟生态，组件丰富，适合大型应用。配合 Vite 开发体验极佳。</span>
+                  </span>
+                </label>
+
+                <label class="flex gap-3 rounded-md border p-3 transition cursor-pointer border-gray-600 bg-gray-900 hover:border-gray-500" data-option="vue" onclick="selectSingle(this, 'vue')">
+                  <input class="mt-1 h-4 w-4 shrink-0 accent-blue-500" type="radio" name="choice-framework" />
+                  <span class="min-w-0">
+                    <span class="block text-sm font-medium text-gray-100">Vue 3 + Vite</span>
+                    <span class="mt-1 block text-sm leading-5 text-gray-400">上手简单，Composition API 灵活，中文文档完善。</span>
+                  </span>
+                </label>
+
+                <label class="flex gap-3 rounded-md border p-3 transition cursor-pointer border-gray-600 bg-gray-900 hover:border-gray-500" data-option="svelte" onclick="selectSingle(this, 'svelte')">
+                  <input class="mt-1 h-4 w-4 shrink-0 accent-blue-500" type="radio" name="choice-framework" />
+                  <span class="min-w-0">
+                    <span class="block text-sm font-medium text-gray-100">SvelteKit</span>
+                    <span class="mt-1 block text-sm leading-5 text-gray-400">编译时框架，零运行时开销，包体积小，性能极佳。</span>
+                  </span>
+                </label>
+
+                <label class="flex gap-3 rounded-md border p-3 transition cursor-pointer border-gray-600 bg-gray-900 hover:border-gray-500" data-option="solid" onclick="selectSingle(this, 'solid')">
+                  <input class="mt-1 h-4 w-4 shrink-0 accent-blue-500" type="radio" name="choice-framework" />
+                  <span class="min-w-0">
+                    <span class="block text-sm font-medium text-gray-100">SolidJS</span>
+                    <span class="mt-1 block text-sm leading-5 text-gray-400">细粒度响应式，无虚拟 DOM，性能接近原生，API 类似 React。</span>
+                  </span>
+                </label>
+              </fieldset>
+
+              <div class="mt-4 flex items-center gap-3">
+                <button id="btn-single" class="h-10 rounded-md bg-blue-500 px-4 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50 hover:bg-blue-600 transition-colors" disabled onclick="submitSingle()">Submit</button>
+              </div>
+            </section>
+          </div>
+        </div>
+
+        <!-- Spacer for second demo -->
+        <div class="pt-4 border-t border-gray-700/50 mt-4">
+          <!-- User message 2 -->
+          <div class="flex justify-end mb-4">
+            <div class="max-w-[80%] px-3 py-2 rounded-lg bg-blue-500 text-white text-content whitespace-pre-wrap">这个项目需要哪些功能模块？让我选一下优先级</div>
+          </div>
+
+          <!-- Assistant text message 2 -->
+          <div class="flex justify-start mb-4">
+            <div class="max-w-[85%] px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-content text-gray-100 whitespace-pre-wrap">了解，以下是建议的功能模块，你可以多选来确定第一期的优先范围：</div>
+          </div>
+
+          <!-- A2UI ChoicePrompt - Multiple Select -->
+          <div class="flex justify-start">
+            <div class="max-w-[85%] space-y-3">
+              <section class="w-full max-w-2xl rounded-lg border border-gray-700 bg-gray-800 p-4 shadow-sm" id="choice-multi">
+                <div class="mb-4">
+                  <h2 class="text-base font-semibold text-gray-100">选择第一期功能模块</h2>
+                  <p class="mt-1 text-sm leading-6 text-gray-400">可多选，选择后将按优先级排列</p>
+                </div>
+                <fieldset class="grid gap-2" id="fieldset-multi">
+                  <legend class="sr-only">选择第一期功能模块</legend>
+
+                  <label class="flex gap-3 rounded-md border p-3 transition cursor-pointer border-gray-600 bg-gray-900 hover:border-gray-500" data-option="auth" onclick="toggleMulti(this, 'auth')">
+                    <input class="mt-1 h-4 w-4 shrink-0 accent-blue-500" type="checkbox" name="choice-module" />
+                    <span class="min-w-0">
+                      <span class="block text-sm font-medium text-gray-100">用户认证模块</span>
+                      <span class="mt-1 block text-sm leading-5 text-gray-400">登录、注册、OAuth、JWT Token 管理</span>
+                    </span>
+                  </label>
+
+                  <label class="flex gap-3 rounded-md border p-3 transition cursor-pointer border-gray-600 bg-gray-900 hover:border-gray-500" data-option="dashboard" onclick="toggleMulti(this, 'dashboard')">
+                    <input class="mt-1 h-4 w-4 shrink-0 accent-blue-500" type="checkbox" name="choice-module" />
+                    <span class="min-w-0">
+                      <span class="block text-sm font-medium text-gray-100">数据仪表盘</span>
+                      <span class="mt-1 block text-sm leading-5 text-gray-400">可视化图表、实时数据展示、自定义面板</span>
+                    </span>
+                  </label>
+
+                  <label class="flex gap-3 rounded-md border p-3 transition cursor-pointer border-gray-600 bg-gray-900 hover:border-gray-500" data-option="chat" onclick="toggleMulti(this, 'chat')">
+                    <input class="mt-1 h-4 w-4 shrink-0 accent-blue-500" type="checkbox" name="choice-module" />
+                    <span class="min-w-0">
+                      <span class="block text-sm font-medium text-gray-100">实时聊天</span>
+                      <span class="mt-1 block text-sm leading-5 text-gray-400">WebSocket 消息、群组聊天、消息历史</span>
+                    </span>
+                  </label>
+
+                  <label class="flex gap-3 rounded-md border p-3 transition cursor-pointer border-gray-600 bg-gray-900 hover:border-gray-500" data-option="file" onclick="toggleMulti(this, 'file')">
+                    <input class="mt-1 h-4 w-4 shrink-0 accent-blue-500" type="checkbox" name="choice-module" />
+                    <span class="min-w-0">
+                      <span class="block text-sm font-medium text-gray-100">文件管理</span>
+                      <span class="mt-1 block text-sm leading-5 text-gray-400">上传、预览、版本控制、权限管理</span>
+                    </span>
+                  </label>
+
+                  <label class="flex gap-3 rounded-md border p-3 transition cursor-pointer border-gray-600 bg-gray-900 hover:border-gray-500" data-option="notification" onclick="toggleMulti(this, 'notification')">
+                    <input class="mt-1 h-4 w-4 shrink-0 accent-blue-500" type="checkbox" name="choice-module" />
+                    <span class="min-w-0">
+                      <span class="block text-sm font-medium text-gray-100">通知系统</span>
+                      <span class="mt-1 block text-sm leading-5 text-gray-400">站内通知、邮件通知、WebPush、通知偏好设置</span>
+                    </span>
+                  </label>
+                </fieldset>
+
+                <div class="mt-4 flex items-center gap-3">
+                  <button id="btn-multi" class="h-10 rounded-md bg-blue-500 px-4 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50 hover:bg-blue-600 transition-colors" disabled onclick="submitMulti()">确认选择</button>
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Input Area -->
+      <div class="relative border-t border-gray-700 bg-gray-800 px-4 py-3">
+        <div class="flex items-end gap-2">
+          <textarea
+            placeholder="Type a message... (/ for commands)"
+            class="flex-1 resize-none rounded-lg border border-gray-600 bg-gray-900 text-content text-gray-100 px-3 py-2 outline-none focus:border-blue-500 placeholder:text-gray-500"
+            style="min-height: 60px; max-height: 200px;"
+            aria-label="Message input"
+          ></textarea>
+          <button class="shrink-0 p-2 rounded-lg bg-blue-500 hover:bg-blue-600 text-white transition-colors" aria-label="Send message">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 19V5m0 0l-7 7m7-7l7 7" />
+            </svg>
+          </button>
+        </div>
+        <div class="mt-1.5 flex items-center gap-3">
+          <button class="flex items-center gap-1 text-xs text-gray-400 hover:text-blue-400 transition-colors">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
+            </svg>
+            <span>New</span>
+          </button>
+          <button onclick="toggleSidebar()" class="flex items-center gap-1 text-xs text-gray-400 hover:text-blue-400 transition-colors">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h7" />
+            </svg>
+            <span>History</span>
+          </button>
+          <div class="flex-1"></div>
+          <div class="flex items-center gap-2 text-xs text-gray-500">
+            <span>Tokens: 2,847</span>
+            <span>· $0.0142</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // --- Single select logic ---
+    let singleSelected = null;
+
+    function selectSingle(label, id) {
+      const fieldset = document.getElementById('fieldset-single');
+      const labels = fieldset.querySelectorAll('label');
+      labels.forEach(l => {
+        l.classList.remove('border-blue-500', 'bg-blue-900/20');
+        l.classList.add('border-gray-600', 'bg-gray-900');
+        l.querySelector('input').checked = false;
+      });
+      label.classList.remove('border-gray-600', 'bg-gray-900');
+      label.classList.add('border-blue-500', 'bg-blue-900/20');
+      label.querySelector('input').checked = true;
+      singleSelected = id;
+      document.getElementById('btn-single').disabled = false;
+    }
+
+    function submitSingle() {
+      if (!singleSelected) return;
+      const btn = document.getElementById('btn-single');
+      btn.textContent = 'Sent';
+      btn.disabled = true;
+      const fieldset = document.getElementById('fieldset-single');
+      fieldset.classList.add('pointer-events-none', 'opacity-70');
+
+      // Add "Choice sent" text
+      const span = document.createElement('span');
+      span.className = 'text-sm text-gray-400';
+      span.textContent = 'Choice sent.';
+      btn.parentElement.appendChild(span);
+
+      // Simulate assistant response
+      setTimeout(() => {
+        const msgList = document.getElementById('message-list');
+        const div = document.createElement('div');
+        div.className = 'flex justify-start mt-4';
+        const names = { react: 'React + Vite', vue: 'Vue 3 + Vite', svelte: 'SvelteKit', solid: 'SolidJS' };
+        div.innerHTML = `<div class="max-w-[85%] px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-content text-gray-100 whitespace-pre-wrap">好的，你选择了 <strong>${names[singleSelected]}</strong>。我来帮你搭建项目基础结构...</div>`;
+        // Insert after the choice section
+        const choiceSection = document.getElementById('choice-single').closest('.flex.justify-start');
+        choiceSection.parentElement.insertBefore(div, choiceSection.nextSibling);
+      }, 500);
+    }
+
+    // --- Multiple select logic ---
+    let multiSelected = new Set();
+
+    function toggleMulti(label, id) {
+      const checkbox = label.querySelector('input');
+      if (multiSelected.has(id)) {
+        multiSelected.delete(id);
+        label.classList.remove('border-blue-500', 'bg-blue-900/20');
+        label.classList.add('border-gray-600', 'bg-gray-900');
+        checkbox.checked = false;
+      } else {
+        multiSelected.add(id);
+        label.classList.remove('border-gray-600', 'bg-gray-900');
+        label.classList.add('border-blue-500', 'bg-blue-900/20');
+        checkbox.checked = true;
+      }
+      document.getElementById('btn-multi').disabled = multiSelected.size === 0;
+    }
+
+    function submitMulti() {
+      if (multiSelected.size === 0) return;
+      const btn = document.getElementById('btn-multi');
+      btn.textContent = 'Sent';
+      btn.disabled = true;
+      const fieldset = document.getElementById('fieldset-multi');
+      fieldset.classList.add('pointer-events-none', 'opacity-70');
+
+      const span = document.createElement('span');
+      span.className = 'text-sm text-gray-400';
+      span.textContent = 'Choice sent.';
+      btn.parentElement.appendChild(span);
+
+      setTimeout(() => {
+        const names = { auth: '用户认证', dashboard: '数据仪表盘', chat: '实时聊天', file: '文件管理', notification: '通知系统' };
+        const selected = [...multiSelected].map(id => names[id]).join('、');
+        const msgList = document.getElementById('message-list');
+        const div = document.createElement('div');
+        div.className = 'flex justify-start mt-4';
+        div.innerHTML = `<div class="max-w-[85%] px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-content text-gray-100 whitespace-pre-wrap">收到！第一期将包含：<strong>${selected}</strong>。\n\n我来规划开发顺序和技术方案...</div>`;
+        const choiceSection = document.getElementById('choice-multi').closest('.flex.justify-start');
+        choiceSection.parentElement.appendChild(div);
+      }, 500);
+    }
+
+    // --- Sidebar toggle ---
+    function toggleSidebar() {
+      const sidebar = document.getElementById('sidebar');
+      if (sidebar.classList.contains('hidden')) {
+        sidebar.classList.remove('hidden');
+      } else {
+        sidebar.classList.add('hidden');
+      }
+    }
+
+    // --- Theme toggle ---
+    function toggleTheme() {
+      document.documentElement.classList.toggle('dark');
+    }
+  </script>
+</body>
+</html>

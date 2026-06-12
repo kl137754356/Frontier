@@ -1,6 +1,6 @@
-# 🦞 Claw Code — Rust Implementation
+# 🦞 Frontier — Rust Implementation
 
-A high-performance Rust rewrite of the Claw Code CLI agent harness. Built for speed, safety, and native tool execution.
+A high-performance Rust rewrite of the Frontier CLI agent harness. Built for speed, safety, and native tool execution.
 
 For a task-oriented guide with copy/paste examples, see [`../USAGE.md`](../USAGE.md).
 
@@ -145,7 +145,7 @@ Top-level commands:
   init
 ```
 
-`claw acp` is a local discoverability surface for editor-first users: it reports the current ACP/Zed status without starting the runtime. As of April 16, 2026, claw-code does **not** ship an ACP/Zed daemon or JSON-RPC entrypoint yet, and `claw acp serve` is only a status alias until the real protocol surface lands. Status queries exit 0 and expose the same machine-readable contract via `--output-format json`; malformed ACP invocations exit 1 with `kind: unsupported_acp_invocation`.
+`claw acp` is a local discoverability surface for editor-first users: it reports the current ACP/Zed status without starting the runtime. As of April 16, 2026, Frontier does **not** ship an ACP/Zed daemon or JSON-RPC entrypoint yet, and `claw acp serve` is only a status alias until the real protocol surface lands. Status queries exit 0 and expose the same machine-readable contract via `--output-format json`; malformed ACP invocations exit 1 with `kind: unsupported_acp_invocation`.
 
 The command surface is moving quickly. For the canonical live help text, run:
 

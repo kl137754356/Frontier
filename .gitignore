@@ -12,3 +12,44 @@ archive/
 status-help.txt
 # Legacy Python port session scratch artifacts
 .port_sessions/
+
+# Node modules
+node_modules/
+**/node_modules/
+
+# Build outputs
+installer/frontend-dist/
+installer/backend-dist/
+installer/shared/
+installer/bin/
+installer/release/
+claw-web-chat/frontend/dist/
+claw-web-chat/backend/dist/
+
+# Rust build outputs
+rust/target/
+
+# Logs
+*.log
+frontier.log
+
+# Environment / secrets
+.env
+.env.local
+**/.env
+**/.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+*.suo
+*.user
+
+# Temp files
+*.tmp
+*.bak
+.claude.zip

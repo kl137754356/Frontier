@@ -62,7 +62,7 @@ ARCHIVE_DIR_MAPPINGS = {
     'state': 'state',
     'tasks': 'tasks.py',
     'tools': 'tools.py',
-    'types': 'types',
+    '_types': '_types',
     'upstreamproxy': 'upstreamproxy',
     'utils': 'utils',
     'vim': 'vim',

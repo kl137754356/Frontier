@@ -1,0 +1,132 @@
+{
+  "schema_version": "1.0.0",
+  "probe_id": "PROBE-EXT-A100-M3R4",
+  "name": "加长杆探针 - 100mm 陶瓷 + M3 红宝石 Ø4",
+  "description": "TP200 测头 + 100mm 陶瓷加长杆 + M3 cube + Ø4 红宝石球测针，用于深孔、腔体、内壁测量",
+  "type": "extended_shaft_probe",
+  "created": "2026-05-15",
+  "owner": "metrology-team",
+  "status": "draft",
+  "tags": ["cmm", "deep_bore", "inner_profile", "tp200", "ceramic_extension"],
+
+  "head": {
+    "model": "TP200",
+    "manufacturer": "Renishaw",
+    "part_no": "A-1207-0061",
+    "interface": "M8 PHE",
+    "type": "strain_gauge_triggering",
+    "repeatability_1sigma_um": 0.35,
+    "trigforce_default": "LOW",
+    "overtravel_xy_deg": 14,
+    "overtravel_z_mm": 6
+  },
+
+  "extension": {
+    "length_mm": 100,
+    "outer_dia_mm": 11,
+    "material": "ZTA_ceramic",
+    "thread_top": "M8_internal",
+    "thread_bottom": "M5_internal",
+    "mass_g": 32,
+    "cte_1e6_per_K": 6.5,
+    "flex_K_um_per_N": 0.3
+  },
+
+  "cube": {
+    "model": "M-2275-2060",
+    "manufacturer": "Renishaw",
+    "material": "titanium",
+    "thread_top": "M8_external",
+    "thread_bottom": "M3_internal_x4"
+  },
+
+  "tips": [
+    {
+      "name": "TIP_M3R4_L30",
+      "manufacturer": "Renishaw",
+      "part_no": "A-5003-7553",
+      "thread": "M3",
+      "ball_dia_mm": 4.0,
+      "ball_material": "ruby",
+      "stem_length_mm": 30,
+      "stem_dia_mm": 3,
+      "stem_material": "titanium",
+      "effective_length_mm": 132,
+      "color": "RED"
+    }
+  ],
+
+  "calibration": {
+    "standard_sphere": {
+      "name": "SPHERE_25",
+      "diameter_mm": 25.0,
+      "part_no": "A-1034-6000",
+      "uncertainty_95_um": 0.6
+    },
+    "standard_ring": {
+      "name": "RING_30",
+      "diameter_mm": 30.0,
+      "part_no": "A-1097-0260",
+      "purpose": "extension_deflection_calibration"
+    },
+    "required_steps": [
+      "head_calibration",
+      "tip_diameter_calibration",
+      "tip_position_calibration",
+      "extension_deflection_calibration_3angles",
+      "probe_verification_25_points"
+    ],
+    "verification_pass_threshold_1sigma_um": 0.5,
+    "calibration_validity_hours": 4
+  },
+
+  "operational": {
+    "move_speed_mm_per_s": 5.0,
+    "trigforce": "LOW",
+    "prehit_mm": 0.5,
+    "retract_mm": 2.0,
+    "max_applications": [
+      "deep_bore_diameter",
+      "inner_profile_cylindricity",
+      "planarity_grid",
+      "hole_position",
+      "thin_wall_thickness"
+    ],
+    "prohibited_applications": [
+      "high_speed_scanning",
+      "soft_material_surface",
+      "feature_smaller_than_4mm"
+    ]
+  },
+
+  "uncertainty": {
+    "method": "GUM_JCGM_100_2008",
+    "uc_um": 2.32,
+    "U95_um": 4.64,
+    "coverage_factor_k": 2,
+    "dominant_sources": ["extension_deflection", "machine_SEC"],
+    "reduction_actions": [
+      "use_CFRP_extension",
+      "enable_machine_SEC_compensation",
+      "increase_repetitions_for_A_class"
+    ]
+  },
+
+  "files": {
+    "specification": "extended_shaft_probe_spec.md",
+    "bom_csv": "extended_shaft_probe_bom.csv",
+    "pcdmis_probe": "pcdmis/probe_setup.prb",
+    "pcdmis_calibration": "pcdmis/calibration.bas",
+    "pcdmis_measurement": "pcdmis/measurement_program.bas",
+    "uncertainty_template": "pcdmis/uncertainty_template.md"
+  },
+
+  "history": [
+    {
+      "date": "2026-05-15",
+      "version": "1.0.0",
+      "author": "metrology-agent",
+      "change": "initial_release"
+    }
+  ]
+}

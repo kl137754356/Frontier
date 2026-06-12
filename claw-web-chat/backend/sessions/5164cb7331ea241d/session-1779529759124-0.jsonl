@@ -1,0 +1,2 @@
+{"created_at_ms":1779529759123,"model":"deepseek-v4-flash","session_id":"session-1779529759124-0","type":"session_meta","updated_at_ms":1779529759123,"version":1,"workspace_root":"D:\\AI_LLM\\LLM\\claw-code\\claw-code"}
+{"message":{"blocks":[{"text":"你现在调用的是哪个模型，哪个Base url","type":"text"}],"role":"user"},"type":"message"}

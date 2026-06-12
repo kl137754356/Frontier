@@ -1,3 +1,9 @@
+// ============================================================
+// 会话模块 (Session Module)
+// ============================================================
+// 提供对话会话的持久化、加载和管理功能
+// 支持 JSON 和 JSONL 两种格式的会话文件存储
+
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::fs::{self, OpenOptions};
@@ -10,126 +16,165 @@ use crate::json::{JsonError, JsonValue};
 use crate::usage::TokenUsage;
 use serde::{Deserialize, Serialize};
 
-const SESSION_VERSION: u32 = 1;
-const ROTATE_AFTER_BYTES: u64 = 256 * 1024;
-const MAX_ROTATED_FILES: usize = 3;
-const MAX_JSONL_FIELD_CHARS: usize = 16 * 1024;
-const JSONL_TRUNCATION_MARKER: &str = "… [truncated for session JSONL]";
-const JSONL_REDACTION_MARKER: &str = "[redacted]";
-static SESSION_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
-static LAST_TIMESTAMP_MS: AtomicU64 = AtomicU64::new(0);
+// 常量定义
+const SESSION_VERSION: u32 = 1;                                      // 会话版本号
+const ROTATE_AFTER_BYTES: u64 = 256 * 1024;                          // 轮转阈值（256KB）
+const MAX_ROTATED_FILES: usize = 3;                                  // 最大轮转文件数
+const MAX_JSONL_FIELD_CHARS: usize = 16 * 1024;                      // JSONL 字段最大字符数
+const JSONL_TRUNCATION_MARKER: &str = "… [truncated for session JSONL]";  // 截断标记
+const JSONL_REDACTION_MARKER: &str = "[redacted]";                   // 脱敏标记
+static SESSION_ID_COUNTER: AtomicU64 = AtomicU64::new(0);            // 会话 ID 计数器
+static LAST_TIMESTAMP_MS: AtomicU64 = AtomicU64::new(0);             // 上次时间戳
 
-/// Speaker role associated with a persisted conversation message.
+// ============================================================
+// 消息角色枚举 (Message Role Enum)
+// ============================================================
+// 定义持久化对话消息的说话者角色
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageRole {
-    System,
-    User,
-    Assistant,
-    Tool,
+    System,     // 系统消息
+    User,       // 用户消息
+    Assistant,  // 助手消息
+    Tool,       // 工具结果消息
 }
 
-/// Structured message content stored inside a [`Session`].
+// ============================================================
+// 内容块枚举 (Content Block Enum)
+// ============================================================
+// 存储在会话中的结构化消息内容
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentBlock {
-    Text {
-        text: String,
+    Text {                     // 文本内容块
+        text: String,          // 文本内容
     },
-    Thinking {
-        thinking: String,
-        signature: Option<String>,
+    Thinking {                 // 思考内容块
+        thinking: String,      // 思考内容
+        signature: Option<String>, // 签名（可选）
     },
-    ToolUse {
-        id: String,
-        name: String,
-        input: String,
+    ToolUse {                  // 工具使用块
+        id: String,            // 工具调用 ID
+        name: String,          // 工具名称
+        input: String,         // 工具输入
     },
-    ToolResult {
-        tool_use_id: String,
-        tool_name: String,
-        output: String,
-        is_error: bool,
+    ToolResult {               // 工具结果块
+        tool_use_id: String,   // 关联的工具调用 ID
+        tool_name: String,     // 工具名称
+        output: String,        // 工具输出
+        is_error: bool,        // 是否错误
     },
 }
 
-/// One conversation message with optional token-usage metadata.
+// ============================================================
+// 对话消息 (Conversation Message)
+// ============================================================
+// 单个对话消息，包含角色、内容块和可选的 Token 使用统计
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationMessage {
-    pub role: MessageRole,
-    pub blocks: Vec<ContentBlock>,
-    pub usage: Option<TokenUsage>,
+    pub role: MessageRole,                 // 消息角色
+    pub blocks: Vec<ContentBlock>,         // 内容块列表
+    pub usage: Option<TokenUsage>,         // Token 使用统计（可选）
 }
 
-/// Metadata describing the latest compaction that summarized a session.
+// ============================================================
+// 会话压缩信息 (Session Compaction)
+// ============================================================
+// 描述最新压缩会话的元数据
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionCompaction {
-    pub count: u32,
-    pub removed_message_count: usize,
-    pub summary: String,
+    pub count: u32,                        // 压缩次数
+    pub removed_message_count: usize,      // 移除的消息数量
+    pub summary: String,                   // 压缩摘要
 }
 
-/// Provenance recorded when a session is forked from another session.
+// ============================================================
+// 会话分支 (Session Fork)
+// ============================================================
+// 记录会话从另一个会话分支时的来源信息
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionFork {
-    pub parent_session_id: String,
-    pub branch_name: Option<String>,
+    pub parent_session_id: String,         // 父会话 ID
+    pub branch_name: Option<String>,       // 分支名称（可选）
 }
 
-/// A single user prompt recorded with a timestamp for history tracking.
+// ============================================================
+// 会话提示条目 (Session Prompt Entry)
+// ============================================================
+// 记录单个用户提示及其时间戳，用于历史追踪
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionPromptEntry {
-    pub timestamp_ms: u64,
-    pub text: String,
+    pub timestamp_ms: u64,                 // 时间戳（毫秒）
+    pub text: String,                      // 提示文本
 }
+
+// ============================================================
+// 会话持久化 (Session Persistence)
+// ============================================================
+// 会话持久化配置
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionPersistence {
-    path: PathBuf,
+    path: PathBuf,  // 持久化文件路径
 }
 
-/// Running-state liveness classification for a session heartbeat.
+// ============================================================
+// 会话活跃状态枚举 (Session Liveness Enum)
+// ============================================================
+// 会话心跳的运行状态活跃度分类
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionLiveness {
-    Healthy,
-    Stalled,
-    TransportDead,
-    Unknown,
+    Healthy,        // 健康
+    Stalled,        // 停滞
+    TransportDead,  // 传输中断
+    Unknown,        // 未知
 }
 
-/// Heartbeat emitted from canonical session state, independent of terminal rendering.
+// ============================================================
+// 会话心跳 (Session Heartbeat)
+// ============================================================
+// 从规范会话状态发出的心跳，独立于终端渲染
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionHeartbeat {
-    pub session_id: String,
-    pub observed_at_ms: u64,
-    pub transport_alive: bool,
-    pub liveness: SessionLiveness,
+    pub session_id: String,            // 会话 ID
+    pub observed_at_ms: u64,           // 观察时间戳
+    pub transport_alive: bool,         // 传输是否存活
+    pub liveness: SessionLiveness,     // 活跃状态
 }
 
-/// Persisted conversational state for the runtime and CLI session manager.
-///
-/// `workspace_root` binds the session to the worktree it was created in. The
-/// global session store under `~/.local/share/opencode` is shared across every
-/// `opencode serve` instance, so without an explicit workspace root parallel
-/// lanes can race and report success while writes land in the wrong CWD. See
-/// ROADMAP.md item 41 (Phantom completions root cause) for the full
-/// background.
+// ============================================================
+// 会话 (Session)
+// ============================================================
+// 运行时和 CLI 会话管理器的持久化对话状态
+//
+// `workspace_root` 将会话绑定到创建它的工作树。
+// 全局会话存储 `~/.local/share/opencode` 在所有 `opencode serve` 实例之间共享，
+// 因此没有明确的 workspace_root，平行分支可能会竞争，并在错误的 CWD 中写入成功。
+// 详见 ROADMAP.md 第 41 项（幻影补全根本原因）的完整背景。
+
 #[derive(Debug, Clone)]
 pub struct Session {
-    pub version: u32,
-    pub session_id: String,
-    pub created_at_ms: u64,
-    pub updated_at_ms: u64,
-    pub messages: Vec<ConversationMessage>,
-    pub compaction: Option<SessionCompaction>,
-    pub fork: Option<SessionFork>,
-    pub workspace_root: Option<PathBuf>,
-    pub prompt_history: Vec<SessionPromptEntry>,
-    /// The model used in this session, persisted so resumed sessions can
-    /// report which model was originally used.
-    /// Timestamp of last successful health check (ROADMAP #38)
+    pub version: u32,                                   // 会话版本
+    pub session_id: String,                             // 会话唯一标识符
+    pub created_at_ms: u64,                             // 创建时间戳
+    pub updated_at_ms: u64,                             // 更新时间戳
+    pub messages: Vec<ConversationMessage>,             // 消息列表
+    pub compaction: Option<SessionCompaction>,          // 压缩信息
+    pub fork: Option<SessionFork>,                      // 分支信息
+    pub workspace_root: Option<PathBuf>,                // 工作区根路径
+    pub prompt_history: Vec<SessionPromptEntry>,        // 提示历史
+    /// 此会话使用的模型，持久化以便恢复的会话可以报告最初使用的模型
+    /// 最后一次成功健康检查的时间戳（ROADMAP #38）
     pub last_health_check_ms: Option<u64>,
-    pub model: Option<String>,
-    persistence: Option<SessionPersistence>,
+    pub model: Option<String>,                          // 模型名称
+    persistence: Option<SessionPersistence>,            // 持久化配置
 }
 
 impl PartialEq for Session {
@@ -182,6 +227,7 @@ impl From<JsonError> for SessionError {
 }
 
 impl Session {
+    /// 创建新的空会话
     #[must_use]
     pub fn new() -> Self {
         let now = current_time_millis();
@@ -201,33 +247,43 @@ impl Session {
         }
     }
 
+    /// 设置持久化路径
+    /// # 参数
+    /// - path: 持久化文件路径
     #[must_use]
     pub fn with_persistence_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.persistence = Some(SessionPersistence { path: path.into() });
         self
     }
 
-    /// Bind this session to the workspace root it was created in.
+    /// 将会话绑定到创建它的工作区根目录
     ///
-    /// This is the per-worktree counterpart to the global session store and
-    /// lets downstream tooling reject writes that drift to the wrong CWD when
-    /// multiple `opencode serve` instances share `~/.local/share/opencode`.
+    /// 这是全局会话存储的每个工作树对应项，
+    /// 让下游工具拒绝在多个 `opencode serve` 实例共享 `~/.local/share/opencode` 时
+    /// 漂移到错误 CWD 的写入。
     #[must_use]
     pub fn with_workspace_root(mut self, workspace_root: impl Into<PathBuf>) -> Self {
         self.workspace_root = Some(workspace_root.into());
         self
     }
 
+    /// 获取工作区根路径
     #[must_use]
     pub fn workspace_root(&self) -> Option<&Path> {
         self.workspace_root.as_deref()
     }
 
+    /// 获取持久化路径
     #[must_use]
     pub fn persistence_path(&self) -> Option<&Path> {
         self.persistence.as_ref().map(|value| value.path.as_path())
     }
 
+    /// 保存会话到指定路径
+    /// # 参数
+    /// - path: 目标文件路径
+    /// # 返回值
+    /// 成功返回 Ok，失败返回会话错误
     pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), SessionError> {
         let path = path.as_ref();
         let snapshot = self.render_jsonl_snapshot()?;
@@ -237,6 +293,11 @@ impl Session {
         Ok(())
     }
 
+    /// 从指定路径加载会话
+    /// # 参数
+    /// - path: 会话文件路径
+    /// # 返回值
+    /// 成功返回会话，失败返回错误
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, SessionError> {
         let path = path.as_ref();
         let contents = fs::read_to_string(path)?;
@@ -253,6 +314,11 @@ impl Session {
         Ok(session.with_persistence_path(path.to_path_buf()))
     }
 
+    /// 推送消息到会话
+    /// # 参数
+    /// - message: 要推送的消息
+    /// # 返回值
+    /// 成功返回 Ok，失败返回错误
     pub fn push_message(&mut self, message: ConversationMessage) -> Result<(), SessionError> {
         self.touch();
         self.messages.push(message);
@@ -269,15 +335,30 @@ impl Session {
         Ok(())
     }
 
+    /// 推送用户文本消息
+    /// # 参数
+    /// - text: 用户输入文本
+    /// # 返回值
+    /// 成功返回 Ok，失败返回错误
     pub fn push_user_text(&mut self, text: impl Into<String>) -> Result<(), SessionError> {
         self.push_message(ConversationMessage::user_text(text))
     }
 
+    /// 记录健康检查
+    /// # 参数
+    /// - timestamp_ms: 健康检查时间戳
     pub fn record_health_check(&mut self, timestamp_ms: u64) {
         self.last_health_check_ms = Some(timestamp_ms);
         self.touch();
     }
 
+    /// 生成会话心跳
+    /// # 参数
+    /// - now_ms: 当前时间戳
+    /// - stalled_after_ms: 停滞判定阈值
+    /// - transport_alive: 传输是否存活
+    /// # 返回值
+    /// 会话心跳信息
     #[must_use]
     pub fn heartbeat_at(
         &self,
@@ -302,6 +383,10 @@ impl Session {
         }
     }
 
+    /// 记录压缩事件
+    /// # 参数
+    /// - summary: 压缩摘要
+    /// - removed_message_count: 移除的消息数量
     pub fn record_compaction(&mut self, summary: impl Into<String>, removed_message_count: usize) {
         self.touch();
         let count = self.compaction.as_ref().map_or(1, |value| value.count + 1);
@@ -312,6 +397,11 @@ impl Session {
         });
     }
 
+    /// 分支会话
+    /// # 参数
+    /// - branch_name: 分支名称（可选）
+    /// # 返回值
+    /// 新的分支会话
     #[must_use]
     pub fn fork(&self, branch_name: Option<String>) -> Self {
         let now = current_time_millis();
@@ -334,6 +424,9 @@ impl Session {
         }
     }
 
+    /// 转换为 JSON 格式
+    /// # 返回值
+    /// JSON 值
     pub fn to_json(&self) -> Result<JsonValue, SessionError> {
         let mut object = BTreeMap::new();
         object.insert(
@@ -387,6 +480,11 @@ impl Session {
         Ok(JsonValue::Object(object))
     }
 
+    /// 从 JSON 格式解析
+    /// # 参数
+    /// - value: JSON 值
+    /// # 返回值
+    /// 解析后的会话
     pub fn from_json(value: &JsonValue) -> Result<Self, SessionError> {
         let object = value
             .as_object()
@@ -458,6 +556,11 @@ impl Session {
         })
     }
 
+    /// 从 JSONL 格式解析
+    /// # 参数
+    /// - contents: JSONL 内容字符串
+    /// # 返回值
+    /// 解析后的会话
     fn from_jsonl(contents: &str) -> Result<Self, SessionError> {
         let mut version = SESSION_VERSION;
         let mut session_id = None;
@@ -559,10 +662,10 @@ impl Session {
         })
     }
 
-    /// Record a user prompt with the current wall-clock timestamp.
+    /// 记录用户提示条目
     ///
-    /// The entry is appended to the in-memory history and, when a persistence
-    /// path is configured, incrementally written to the JSONL session file.
+    /// 条目被追加到内存历史记录中，当配置了持久化路径时，
+    /// 增量写入 JSONL 会话文件。
     pub fn push_prompt_entry(&mut self, text: impl Into<String>) -> Result<(), SessionError> {
         let timestamp_ms = current_time_millis();
         let entry = SessionPromptEntry {
@@ -574,6 +677,7 @@ impl Session {
         self.append_persisted_prompt_entry(entry_ref)
     }
 
+    /// 渲染 JSONL 快照
     fn render_jsonl_snapshot(&self) -> Result<String, SessionError> {
         let mut lines = vec![self.meta_record()?.render()];
         if let Some(compaction) = &self.compaction {
@@ -594,6 +698,7 @@ impl Session {
         Ok(rendered)
     }
 
+    /// 追加持久化消息
     fn append_persisted_message(&self, message: &ConversationMessage) -> Result<(), SessionError> {
         let Some(path) = self.persistence_path() else {
             return Ok(());
@@ -610,6 +715,7 @@ impl Session {
         Ok(())
     }
 
+    /// 追加持久化提示条目
     fn append_persisted_prompt_entry(
         &self,
         entry: &SessionPromptEntry,
@@ -629,6 +735,7 @@ impl Session {
         Ok(())
     }
 
+    /// 生成元记录
     fn meta_record(&self) -> Result<JsonValue, SessionError> {
         let mut object = BTreeMap::new();
         object.insert(
@@ -666,6 +773,7 @@ impl Session {
         Ok(JsonValue::Object(object))
     }
 
+    /// 更新会话时间戳
     fn touch(&mut self) {
         self.updated_at_ms = current_time_millis();
     }

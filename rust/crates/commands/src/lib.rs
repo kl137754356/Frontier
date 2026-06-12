@@ -1,236 +1,273 @@
+// ============================================================
+// Frontier - 斜杠命令模块
+// 文件位置：rust/crates/commands/src/lib.rs
+// 功能：斜杠命令注册、命令解析、帮助渲染、技能命令处理
+// ============================================================
+
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+// Plugins 模块 - 插件管理
 use plugins::{PluginError, PluginLoadFailure, PluginManager, PluginSummary};
+
+// Runtime 模块 - 运行时组件
 use runtime::{
     compact_session, CompactionConfig, ConfigLoader, ConfigSource, McpOAuthConfig, McpServerConfig,
     ScopedMcpServerConfig, Session,
 };
+
+// Serde JSON - JSON 序列化
 use serde_json::{json, Value};
 
+/// 命令清单条目 - 注册表中的命令项
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandManifestEntry {
-    pub name: String,
-    pub source: CommandSource,
+    pub name: String,          // 命令名称
+    pub source: CommandSource, // 命令来源
 }
 
+/// 命令来源类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandSource {
-    Builtin,
-    InternalOnly,
-    FeatureGated,
+    Builtin,        // 内置命令
+    InternalOnly,   // 内部命令
+    FeatureGated,   // 功能门控命令（需要特定功能开启）
 }
 
+/// 命令注册表
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommandRegistry {
-    entries: Vec<CommandManifestEntry>,
+    entries: Vec<CommandManifestEntry>,  // 命令条目列表
 }
 
 impl CommandRegistry {
+    /// 创建新的命令注册表
     #[must_use]
     pub fn new(entries: Vec<CommandManifestEntry>) -> Self {
         Self { entries }
     }
 
+    /// 获取所有命令条目
     #[must_use]
     pub fn entries(&self) -> &[CommandManifestEntry] {
         &self.entries
     }
 }
 
+/// 斜杠命令规范 - 定义每个斜杠命令的属性
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SlashCommandSpec {
-    pub name: &'static str,
-    pub aliases: &'static [&'static str],
-    pub summary: &'static str,
-    pub argument_hint: Option<&'static str>,
-    pub resume_supported: bool,
+    pub name: &'static str,                    // 命令名称
+    pub aliases: &'static [&'static str],      // 命令别名
+    pub summary: &'static str,                 // 命令摘要描述
+    pub argument_hint: Option<&'static str>,   // 参数提示
+    pub resume_supported: bool,                // 是否支持会话恢复
 }
 
+/// 技能命令分发类型
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkillSlashDispatch {
-    Local,
-    Invoke(String),
+    Local,      // 本地处理
+    Invoke(String),  // 调用外部命令
 }
 
+// ============================================================
+// 斜杠命令规范列表
+// 这些是 Frontier 支持的所有斜杠命令
+// ============================================================
 const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
+    // ----------------------------------------
+    // 会话相关命令
+    // ----------------------------------------
     SlashCommandSpec {
         name: "help",
         aliases: &[],
-        summary: "Show available slash commands",
+        summary: "显示可用的斜杠命令",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "status",
         aliases: &[],
-        summary: "Show current session status",
+        summary: "显示当前会话状态",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "sandbox",
         aliases: &[],
-        summary: "Show sandbox isolation status",
+        summary: "显示沙箱隔离状态",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "compact",
         aliases: &[],
-        summary: "Compact local session history",
+        summary: "压缩本地会话历史",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "model",
         aliases: &[],
-        summary: "Show or switch the active model",
+        summary: "显示或切换当前模型",
         argument_hint: Some("[model]"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "permissions",
         aliases: &[],
-        summary: "Show or switch the active permission mode",
+        summary: "显示或切换当前权限模式",
         argument_hint: Some("[read-only|workspace-write|danger-full-access]"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "clear",
         aliases: &[],
-        summary: "Start a fresh local session",
+        summary: "开始一个新的本地会话",
         argument_hint: Some("[--confirm]"),
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "cost",
         aliases: &[],
-        summary: "Show cumulative token usage for this session",
+        summary: "显示当前会话的累计 token 使用量",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "resume",
         aliases: &[],
-        summary: "Load a saved session into the REPL",
+        summary: "将保存的会话加载到 REPL",
         argument_hint: Some("<session-path>"),
         resume_supported: false,
     },
+    // ----------------------------------------
+    // 配置和检查命令
+    // ----------------------------------------
     SlashCommandSpec {
         name: "config",
         aliases: &[],
-        summary: "Inspect Claude config files or merged sections",
+        summary: "检查 Claude 配置文件或合并的配置段",
         argument_hint: Some("[env|hooks|model|plugins]"),
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "mcp",
         aliases: &[],
-        summary: "Inspect configured MCP servers",
+        summary: "检查配置的 MCP 服务器",
         argument_hint: Some("[list|show <server>|help]"),
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "memory",
         aliases: &[],
-        summary: "Inspect loaded Claude instruction memory files",
+        summary: "检查加载的 Claude 指令内存文件",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "init",
         aliases: &[],
-        summary: "Create a starter CLAUDE.md for this repo",
+        summary: "为当前仓库创建 CLAUDE.md 入门文件",
         argument_hint: None,
         resume_supported: true,
     },
+    // ----------------------------------------
+    // Git 和版本控制命令
+    // ----------------------------------------
     SlashCommandSpec {
         name: "diff",
         aliases: &[],
-        summary: "Show git diff for current workspace changes",
+        summary: "显示当前工作区变更的 git diff",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "version",
         aliases: &[],
-        summary: "Show CLI version and build information",
+        summary: "显示 CLI 版本和构建信息",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "bughunter",
         aliases: &[],
-        summary: "Inspect the codebase for likely bugs",
+        summary: "检查代码库中的潜在 bug",
         argument_hint: Some("[scope]"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "commit",
         aliases: &[],
-        summary: "Generate a commit message and create a git commit",
+        summary: "生成提交信息并创建 git 提交",
         argument_hint: None,
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "pr",
         aliases: &[],
-        summary: "Draft or create a pull request from the conversation",
+        summary: "根据对话内容起草或创建 pull request",
         argument_hint: Some("[context]"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "issue",
         aliases: &[],
-        summary: "Draft or create a GitHub issue from the conversation",
+        summary: "根据对话内容起草或创建 GitHub issue",
         argument_hint: Some("[context]"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "ultraplan",
         aliases: &[],
-        summary: "Run a deep planning prompt with multi-step reasoning",
+        summary: "运行深度规划提示（多步骤推理）",
         argument_hint: Some("[task]"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "teleport",
         aliases: &[],
-        summary: "Jump to a file or symbol by searching the workspace",
+        summary: "通过搜索工作区跳转到文件或符号",
         argument_hint: Some("<symbol-or-path>"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "debug-tool-call",
         aliases: &[],
-        summary: "Replay the last tool call with debug details",
+        summary: "重放最后一次工具调用并显示调试详情",
         argument_hint: None,
         resume_supported: false,
     },
+    // ----------------------------------------
+    // 会话管理命令
+    // ----------------------------------------
     SlashCommandSpec {
         name: "export",
         aliases: &[],
-        summary: "Export the current conversation to a file",
+        summary: "将会话导出到文件",
         argument_hint: Some("[file]"),
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "session",
         aliases: &[],
-        summary: "List, check, switch, fork, or delete managed local sessions",
+        summary: "列出、检查、切换、分支或删除本地会话",
         argument_hint: Some(
             "[list|exists <session-id>|switch <session-id>|fork [branch-name]|delete <session-id> [--force]]",
         ),
         resume_supported: true,
     },
+    // ----------------------------------------
+    // 扩展命令（插件、技能、代理）
+    // ----------------------------------------
     SlashCommandSpec {
         name: "plugin",
         aliases: &["plugins", "marketplace"],
-        summary: "Manage Claw Code plugins",
+        summary: "管理 Frontier 插件",
         argument_hint: Some(
             "[list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]",
         ),
@@ -239,490 +276,541 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "agents",
         aliases: &[],
-        summary: "List configured agents",
+        summary: "列出配置的代理",
         argument_hint: Some("[list|help]"),
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "skills",
         aliases: &["skill"],
-        summary: "List, install, or invoke available skills",
+        summary: "列出、安装或调用可用的技能",
         argument_hint: Some("[list|install <path>|help|<skill> [args]]"),
         resume_supported: true,
     },
+    // ----------------------------------------
+    // 诊断和维护命令
+    // ----------------------------------------
     SlashCommandSpec {
         name: "doctor",
         aliases: &[],
-        summary: "Diagnose setup issues and environment health",
+        summary: "诊断设置问题和环境健康状态",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "plan",
         aliases: &[],
-        summary: "Toggle or inspect planning mode",
+        summary: "切换或检查规划模式",
         argument_hint: Some("[on|off]"),
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "review",
         aliases: &[],
-        summary: "Run a code review on current changes",
+        summary: "对当前变更运行代码审查",
         argument_hint: Some("[scope]"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "tasks",
         aliases: &[],
-        summary: "List and manage background tasks",
+        summary: "列出和管理后台任务",
         argument_hint: Some("[list|get <id>|stop <id>]"),
         resume_supported: true,
     },
+    // ----------------------------------------
+    // UI 和体验命令
+    // ----------------------------------------
     SlashCommandSpec {
         name: "theme",
         aliases: &[],
-        summary: "Switch the terminal color theme",
+        summary: "切换终端颜色主题",
         argument_hint: Some("[theme-name]"),
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "vim",
         aliases: &[],
-        summary: "Toggle vim keybinding mode",
+        summary: "切换 vim 按键绑定模式",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "voice",
         aliases: &[],
-        summary: "Toggle voice input mode",
+        summary: "切换语音输入模式",
         argument_hint: Some("[on|off]"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "upgrade",
         aliases: &[],
-        summary: "Check for and install CLI updates",
+        summary: "检查并安装 CLI 更新",
         argument_hint: None,
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "usage",
         aliases: &[],
-        summary: "Show detailed API usage statistics",
+        summary: "显示详细的 API 使用统计",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "stats",
         aliases: &[],
-        summary: "Show workspace and session statistics",
+        summary: "显示工作区和会话统计",
         argument_hint: None,
         resume_supported: true,
     },
+    // ----------------------------------------
+    // 会话操作命令
+    // ----------------------------------------
     SlashCommandSpec {
         name: "rename",
         aliases: &[],
-        summary: "Rename the current session",
+        summary: "重命名当前会话",
         argument_hint: Some("<name>"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "copy",
         aliases: &[],
-        summary: "Copy conversation or output to clipboard",
+        summary: "复制对话或输出到剪贴板",
         argument_hint: Some("[last|all]"),
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "share",
         aliases: &[],
-        summary: "Share the current conversation",
+        summary: "分享当前对话",
         argument_hint: None,
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "feedback",
         aliases: &[],
-        summary: "Submit feedback about the current session",
+        summary: "提交关于当前会话的反馈",
         argument_hint: None,
         resume_supported: false,
     },
+    // ----------------------------------------
+    // 钩子和上下文命令
+    // ----------------------------------------
     SlashCommandSpec {
         name: "hooks",
         aliases: &[],
-        summary: "List and manage lifecycle hooks",
+        summary: "列出和管理生命周期钩子",
         argument_hint: Some("[list|run <hook>]"),
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "files",
         aliases: &[],
-        summary: "List files in the current context window",
+        summary: "列出当前上下文窗口中的文件",
         argument_hint: None,
         resume_supported: true,
     },
+    // ----------------------------------------
+    // 上下文和显示命令
+    // ----------------------------------------
     SlashCommandSpec {
         name: "context",
         aliases: &[],
-        summary: "Inspect or manage the conversation context",
+        summary: "检查或管理对话上下文",
         argument_hint: Some("[show|clear]"),
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "color",
         aliases: &[],
-        summary: "Configure terminal color settings",
+        summary: "配置终端颜色设置",
         argument_hint: Some("[scheme]"),
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "effort",
         aliases: &[],
-        summary: "Set the effort level for responses",
+        summary: "设置响应 effort 级别",
         argument_hint: Some("[low|medium|high]"),
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "fast",
         aliases: &[],
-        summary: "Toggle fast/concise response mode",
+        summary: "切换快速/简洁响应模式",
         argument_hint: None,
         resume_supported: true,
     },
+    // ----------------------------------------
+    // 导航和操作命令
+    // ----------------------------------------
     SlashCommandSpec {
         name: "exit",
         aliases: &[],
-        summary: "Exit the REPL session",
+        summary: "退出 REPL 会话",
         argument_hint: None,
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "branch",
         aliases: &[],
-        summary: "Create or switch git branches",
+        summary: "创建或切换 git 分支",
         argument_hint: Some("[name]"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "rewind",
         aliases: &[],
-        summary: "Rewind the conversation to a previous state",
+        summary: "将对话回退到之前的状态",
         argument_hint: Some("[steps]"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "summary",
         aliases: &[],
-        summary: "Generate a summary of the conversation",
+        summary: "生成对话摘要",
         argument_hint: None,
         resume_supported: true,
     },
+    // ----------------------------------------
+    // IDE 集成命令
+    // ----------------------------------------
     SlashCommandSpec {
         name: "desktop",
         aliases: &[],
-        summary: "Open or manage the desktop app integration",
+        summary: "打开或管理桌面应用集成",
         argument_hint: None,
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "ide",
         aliases: &[],
-        summary: "Open or configure IDE integration",
+        summary: "打开或配置 IDE 集成",
         argument_hint: Some("[vscode|cursor]"),
         resume_supported: false,
     },
+    // ----------------------------------------
+    // 标记和模式命令
+    // ----------------------------------------
     SlashCommandSpec {
         name: "tag",
         aliases: &[],
-        summary: "Tag the current conversation point",
+        summary: "标记当前对话点",
         argument_hint: Some("[label]"),
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "brief",
         aliases: &[],
-        summary: "Toggle brief output mode",
+        summary: "切换简洁输出模式",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "advisor",
         aliases: &[],
-        summary: "Toggle advisor mode for guidance-only responses",
+        summary: "切换顾问模式（仅指导性响应）",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "stickers",
         aliases: &[],
-        summary: "Browse and manage sticker packs",
+        summary: "浏览和管理贴纸包",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "insights",
         aliases: &[],
-        summary: "Show AI-generated insights about the session",
+        summary: "显示 AI 生成的会话洞察",
         argument_hint: None,
         resume_supported: true,
     },
+    // ----------------------------------------
+    // 分析和工具命令
+    // ----------------------------------------
     SlashCommandSpec {
         name: "thinkback",
         aliases: &[],
-        summary: "Replay the thinking process of the last response",
+        summary: "重放上一次响应的思考过程",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "release-notes",
         aliases: &[],
-        summary: "Generate release notes from recent changes",
+        summary: "根据最近的变更生成发布说明",
         argument_hint: None,
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "security-review",
         aliases: &[],
-        summary: "Run a security review on the codebase",
+        summary: "对代码库运行安全审查",
         argument_hint: Some("[scope]"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "keybindings",
         aliases: &[],
-        summary: "Show or configure keyboard shortcuts",
+        summary: "显示或配置键盘快捷键",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "privacy-settings",
         aliases: &[],
-        summary: "View or modify privacy settings",
+        summary: "查看或修改隐私设置",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "output-style",
         aliases: &[],
-        summary: "Switch output formatting style",
+        summary: "切换输出格式化风格",
         argument_hint: Some("[style]"),
         resume_supported: true,
     },
+    // ----------------------------------------
+    // 工具和权限命令
+    // ----------------------------------------
     SlashCommandSpec {
         name: "add-dir",
         aliases: &[],
-        summary: "Add an additional directory to the context",
+        summary: "向上下文添加额外的目录",
         argument_hint: Some("<path>"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "allowed-tools",
         aliases: &[],
-        summary: "Show or modify the allowed tools list",
+        summary: "显示或修改允许的工具列表",
         argument_hint: Some("[add|remove|list] [tool]"),
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "api-key",
         aliases: &[],
-        summary: "Show or set the Anthropic API key",
+        summary: "显示或设置 Anthropic API 密钥",
         argument_hint: Some("[key]"),
         resume_supported: false,
     },
+    // ----------------------------------------
+    // 权限确认命令
+    // ----------------------------------------
     SlashCommandSpec {
         name: "approve",
         aliases: &["yes", "y"],
-        summary: "Approve a pending tool execution",
+        summary: "批准待执行的工具",
         argument_hint: None,
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "deny",
         aliases: &["no", "n"],
-        summary: "Deny a pending tool execution",
+        summary: "拒绝待执行的工具",
         argument_hint: None,
         resume_supported: false,
     },
+    // ----------------------------------------
+    // 操作命令
+    // ----------------------------------------
     SlashCommandSpec {
         name: "undo",
         aliases: &[],
-        summary: "Undo the last file write or edit",
+        summary: "撤销上一次的写入或编辑",
         argument_hint: None,
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "stop",
         aliases: &[],
-        summary: "Stop the current generation",
+        summary: "停止当前生成",
         argument_hint: None,
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "retry",
         aliases: &[],
-        summary: "Retry the last failed message",
+        summary: "重试上一次失败的消息",
         argument_hint: None,
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "paste",
         aliases: &[],
-        summary: "Paste clipboard content as input",
+        summary: "将剪贴板内容粘贴为输入",
         argument_hint: None,
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "screenshot",
         aliases: &[],
-        summary: "Take a screenshot and add to conversation",
+        summary: "截图并添加到对话",
         argument_hint: None,
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "image",
         aliases: &[],
-        summary: "Add an image file to the conversation",
+        summary: "将图片文件添加到对话",
         argument_hint: Some("<path>"),
         resume_supported: false,
     },
+    // ----------------------------------------
+    // 终端和搜索命令
+    // ----------------------------------------
     SlashCommandSpec {
         name: "terminal-setup",
         aliases: &[],
-        summary: "Configure terminal integration settings",
+        summary: "配置终端集成设置",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "search",
         aliases: &[],
-        summary: "Search files in the workspace",
+        summary: "在工作区搜索文件",
         argument_hint: Some("<query>"),
         resume_supported: false,
     },
+    // ----------------------------------------
+    // 语音和界面命令
+    // ----------------------------------------
     SlashCommandSpec {
         name: "listen",
         aliases: &[],
-        summary: "Listen for voice input",
+        summary: "监听语音输入",
         argument_hint: None,
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "speak",
         aliases: &[],
-        summary: "Read the last response aloud",
+        summary: "朗读上一次响应",
         argument_hint: None,
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "language",
         aliases: &[],
-        summary: "Set the interface language",
+        summary: "设置界面语言",
         argument_hint: Some("[language]"),
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "profile",
         aliases: &[],
-        summary: "Show or switch user profile",
+        summary: "显示或切换用户配置文件",
         argument_hint: Some("[name]"),
         resume_supported: false,
     },
+    // ----------------------------------------
+    // 模型参数命令
+    // ----------------------------------------
     SlashCommandSpec {
         name: "max-tokens",
         aliases: &[],
-        summary: "Show or set the max output tokens",
+        summary: "显示或设置最大输出 tokens",
         argument_hint: Some("[count]"),
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "temperature",
         aliases: &[],
-        summary: "Show or set the sampling temperature",
+        summary: "显示或设置采样温度",
         argument_hint: Some("[value]"),
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "system-prompt",
         aliases: &[],
-        summary: "Show the active system prompt",
+        summary: "显示当前系统提示",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "tool-details",
         aliases: &[],
-        summary: "Show detailed info about a specific tool",
+        summary: "显示特定工具的详细信息",
         argument_hint: Some("<tool-name>"),
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "format",
         aliases: &[],
-        summary: "Format the last response in a different style",
+        summary: "用不同风格格式化上一次响应",
         argument_hint: Some("[markdown|plain|json]"),
         resume_supported: false,
     },
+    // ----------------------------------------
+    // 消息管理命令
+    // ----------------------------------------
     SlashCommandSpec {
         name: "pin",
         aliases: &[],
-        summary: "Pin a message to persist across compaction",
+        summary: "固定消息，使其在压缩后保留",
         argument_hint: Some("[message-index]"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "unpin",
         aliases: &[],
-        summary: "Unpin a previously pinned message",
+        summary: "取消固定之前固定的消息",
         argument_hint: Some("[message-index]"),
         resume_supported: false,
     },
     SlashCommandSpec {
         name: "bookmarks",
         aliases: &[],
-        summary: "List or manage conversation bookmarks",
+        summary: "列出或管理对话书签",
         argument_hint: Some("[add|remove|list]"),
         resume_supported: true,
     },
+    // ----------------------------------------
+    // 工作区命令
+    // ----------------------------------------
     SlashCommandSpec {
         name: "workspace",
         aliases: &["cwd"],
-        summary: "Show or change the working directory",
+        summary: "显示或更改工作目录",
         argument_hint: Some("[path]"),
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "history",
         aliases: &[],
-        summary: "Show conversation history summary",
+        summary: "显示对话历史摘要",
         argument_hint: Some("[count]"),
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "tokens",
         aliases: &[],
-        summary: "Show token count for the current conversation",
+        summary: "显示当前对话的 token 数量",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "cache",
         aliases: &[],
-        summary: "Show prompt cache statistics",
+        summary: "显示提示缓存统计",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "providers",
         aliases: &[],
-        summary: "List available model providers",
+        summary: "列出可用的模型提供商",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "notifications",
         aliases: &[],
-        summary: "Show or configure notification settings",
+        summary: "显示或配置通知设置",
         argument_hint: Some("[on|off|status]"),
         resume_supported: true,
     },
@@ -4975,7 +5063,7 @@ mod tests {
 
         // then
         assert!(help.contains("/plugin"));
-        assert!(help.contains("Summary          Manage Claw Code plugins"));
+        assert!(help.contains("Summary          Manage Frontier plugins"));
         assert!(help.contains("Aliases          /plugins, /marketplace"));
         assert!(help.contains("Category         Tools"));
     }

@@ -1,0 +1,374 @@
+﻿#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Frontier AI 聊天助手界面 - 单次 prompt 模式
+"""
+
+import sys
+import os
+import subprocess
+from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
+                               QTextEdit, QPushButton, QLabel, QFrame, QScrollArea)
+from PySide6.QtCore import Qt, QTimer, Signal, QThread
+from PySide6.QtGui import QFont, QCursor
+
+
+# --------------------------
+# 悬浮球
+# --------------------------
+class FloatBall(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(58, 58)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #6366f1;
+                border-radius: 29px;
+            }
+        """)
+        self.dragging = False
+        self.move(1000, 600)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.drag_start = e.globalPosition().toPoint()
+            self.window_pos = self.pos()
+            self.dragging = True
+
+    def mouseMoveEvent(self, e):
+        if self.dragging:
+            delta = e.globalPosition().toPoint() - self.drag_start
+            self.move(self.window_pos + delta)
+
+    def mouseReleaseEvent(self, e):
+        self.dragging = False
+
+
+# --------------------------
+# 消息气泡
+# --------------------------
+class MessageBubble(QWidget):
+    def __init__(self, text, is_user=False, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        label = QLabel(text)
+        label.setWordWrap(True)
+        label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        if is_user:
+            label.setStyleSheet("""
+                color: white;
+                font-size: 14px;
+                background-color: #6366f1;
+                border-radius: 14px;
+                border-top-right-radius: 4px;
+                padding: 10px 14px;
+            """)
+            layout.setAlignment(Qt.AlignRight)
+        else:
+            label.setStyleSheet("""
+                color: #111827;
+                font-size: 14px;
+                background-color: white;
+                border: 1px solid #e5e7eb;
+                border-radius: 14px;
+                border-top-left-radius: 4px;
+                padding: 10px 14px;
+            """)
+            layout.setAlignment(Qt.AlignLeft)
+
+        layout.addWidget(label)
+
+
+# --------------------------
+# 聊天窗口
+# --------------------------
+class ChatWindow(QWidget):
+    send_message = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(420, 680)
+        self.setWindowTitle("Polaris 助手")
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setup_ui()
+
+    def setup_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # 顶部标题
+        header = QLabel(" Polaris 助手")
+        header.setFixedHeight(52)
+        header.setStyleSheet("""
+            background-color: #6366f1;
+            color: white;
+            font-size: 16px;
+            padding-left: 16px;
+            border-top-left-radius: 18px;
+            border-top-right-radius: 18px;
+        """)
+        main_layout.addWidget(header)
+
+        # 聊天内容区
+        self.chat_area = QWidget()
+        self.chat_area.setStyleSheet("background-color: #f9fafb;")
+        self.chat_layout = QVBoxLayout(self.chat_area)
+        self.chat_layout.addStretch()
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self.chat_area)
+        scroll.setStyleSheet("""
+            background-color: #f9fafb;
+            border: none;
+        """)
+        main_layout.addWidget(scroll, 1)
+
+        # 底部输入区域
+        self.build_input_area(main_layout)
+
+        # 初始消息
+        self.add_message("你好！我是Hexagon助手，你可以问我各种问题～", is_user=False)
+
+    def build_input_area(self, parent_layout):
+        input_widget = QWidget()
+        input_widget.setStyleSheet("""
+            background-color: white;
+            border-top: 1px solid #eee;
+            border-bottom-left-radius: 18px;
+            border-bottom-right-radius: 18px;
+        """)
+        layout = QVBoxLayout(input_widget)
+        layout.setContentsMargins(12, 12, 12, 12)
+
+        self.text_input = QTextEdit()
+        self.text_input.setPlaceholderText("请输入问题...")
+        self.text_input.setMaximumHeight(100)
+        self.text_input.setStyleSheet("""
+            QTextEdit {
+                border: 1px solid #e5e7eb;
+                border-radius: 16px;
+                padding: 12px 14px;
+                font-size: 14px;
+                background-color: white;
+            }
+        """)
+        layout.addWidget(self.text_input)
+
+        # 工具栏
+        bar = QWidget()
+        bar.setStyleSheet("border-top: 1px solid #f3f4f6;")
+        bar_layout = QHBoxLayout(bar)
+        bar_layout.setContentsMargins(10, 6, 10, 6)
+
+        btn_style = """
+            QPushButton {
+                border: none;
+                background: transparent;
+                font-size: 16px;
+                border-radius: 8px;
+                width: 32px;
+                height: 32px;
+            }
+            QPushButton:hover {
+                background-color: #f3f4f6;
+            }
+        """
+
+        btn_shot = QPushButton("📷")
+        btn_shot.setFixedSize(32, 32)
+        btn_shot.setStyleSheet(btn_style)
+        bar_layout.addWidget(btn_shot)
+
+        btn_attach = QPushButton("📎")
+        btn_attach.setFixedSize(32, 32)
+        btn_attach.setStyleSheet(btn_style)
+        bar_layout.addWidget(btn_attach)
+
+        bar_layout.addStretch()
+
+        btn_new = QPushButton("➕")
+        btn_new.setFixedSize(32, 32)
+        btn_new.setStyleSheet(btn_style)
+        bar_layout.addWidget(btn_new)
+
+        btn_history = QPushButton("🕘")
+        btn_history.setFixedSize(32, 32)
+        btn_history.setStyleSheet(btn_style)
+        bar_layout.addWidget(btn_history)
+
+        self.btn_send = QPushButton("发送")
+        self.btn_send.setStyleSheet("""
+            QPushButton {
+                background-color: #6366f1;
+                color: white;
+                padding: 8px 16px;
+                border-radius: 14px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #4f46e5;
+            }
+        """)
+        self.btn_send.clicked.connect(self.on_send)
+        bar_layout.addWidget(self.btn_send)
+
+        layout.addWidget(bar)
+        parent_layout.addWidget(input_widget)
+
+    def on_send(self):
+        text = self.text_input.toPlainText().strip()
+        if text:
+            self.send_message.emit(text)
+            self.text_input.clear()
+
+    def add_message(self, text, is_user):
+        bubble = MessageBubble(text, is_user, self.chat_area)
+        self.chat_layout.insertWidget(self.chat_layout.count() - 1, bubble)
+        QTimer.singleShot(10, self.scroll_to_bottom)
+
+    def scroll_to_bottom(self):
+        for child in self.findChildren(QScrollArea):
+            child.verticalScrollBar().setValue(child.verticalScrollBar().maximum())
+
+    def clear_messages(self):
+        while self.chat_layout.count() > 1:
+            item = self.chat_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+
+# --------------------------
+# 后台工作线程：调用 claw.exe
+# --------------------------
+class ClawWorker(QThread):
+    finished = Signal(str)
+    error = Signal(str)
+
+    def __init__(self, prompt_text, env, cwd):
+        super().__init__()
+        self.prompt_text = prompt_text
+        self.env = env
+        self.cwd = cwd
+
+    def run(self):
+        try:
+            claw_path = os.path.join(self.cwd, "rust", "target", "debug", "claw.exe")
+            cmd = [claw_path, "--output-format", "text", "--compact",
+                   "--dangerously-skip-permissions",
+                   "--allowedTools", "PowerShell,bash,read_file,grep_search,Skill",
+                   "prompt", self.prompt_text]
+
+            result = subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=self.env,
+                cwd=self.cwd,
+                timeout=120,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+
+            stdout = result.stdout.decode("utf-8", errors="replace").strip()
+            stderr = result.stderr.decode("utf-8", errors="replace").strip()
+
+            if result.returncode == 0:
+                self.finished.emit(stdout if stdout else "(无返回内容)")
+            else:
+                self.error.emit(stderr or stdout or f"进程退出码: {result.returncode}")
+
+        except subprocess.TimeoutExpired:
+            self.error.emit("请求超时（120秒）")
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+# --------------------------
+# 主程序
+# --------------------------
+class MainWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.project_dir = os.path.dirname(os.path.abspath(__file__))
+        self.env = self.load_env()
+        self.worker = None
+
+        # 悬浮球
+        self.float_ball = FloatBall()
+        self.float_ball.show()
+
+        # 聊天窗口
+        self.chat_window = ChatWindow()
+        self.chat_window.send_message.connect(self.on_send)
+        self.chat_window.show()
+
+        # 悬浮球点击切换显示
+        self.float_ball.mouseReleaseEvent = self.on_ball_click
+
+    def load_env(self):
+        """加载环境变量"""
+        env = os.environ.copy()
+        ps_script = os.path.join(self.project_dir, "set-anthropic-env.ps1")
+        if os.path.exists(ps_script):
+            try:
+                cmd = f'powershell -NoProfile -ExecutionPolicy Bypass -Command ". \'{ps_script}\'; Get-ChildItem Env:ANTHROPIC_* | ForEach-Object {{ \\"$($_.Name)=$($_.Value)\\" }}"'
+                result = os.popen(cmd).read()
+                for line in result.splitlines():
+                    line = line.strip()
+                    if line and '=' in line:
+                        key, _, value = line.partition('=')
+                        env[key] = value
+            except Exception as e:
+                print(f"加载环境变量失败: {e}")
+        return env
+
+    def on_ball_click(self, e):
+        if e.button() == Qt.LeftButton:
+            if self.chat_window.isVisible():
+                self.chat_window.hide()
+            else:
+                self.chat_window.show()
+
+    def on_send(self, text):
+        """发送消息"""
+        self.chat_window.add_message(text, is_user=True)
+
+        # 禁用发送按钮
+        self.chat_window.btn_send.setEnabled(False)
+        self.chat_window.btn_send.setText("等待中")
+
+        # 调用 claw
+        self.worker = ClawWorker(text, self.env, self.project_dir)
+        self.worker.finished.connect(self.on_ai_reply)
+        self.worker.error.connect(self.on_ai_error)
+        self.worker.start()
+
+    def on_ai_reply(self, text):
+        """AI 回复"""
+        self.chat_window.add_message(text, is_user=False)
+        self.chat_window.btn_send.setEnabled(True)
+        self.chat_window.btn_send.setText("发送")
+
+    def on_ai_error(self, err):
+        """AI 调用出错"""
+        self.chat_window.add_message(f"⚠️ 错误: {err}", is_user=False)
+        self.chat_window.btn_send.setEnabled(True)
+        self.chat_window.btn_send.setText("发送")
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    font = QFont("Segoe UI", 10)
+    font.setStyleStrategy(QFont.PreferAntialias)
+    app.setFont(font)
+    window = MainWindow()
+    sys.exit(app.exec())

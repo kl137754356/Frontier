@@ -1,16 +1,29 @@
+// ============================================================
+// Frontier - 工具模块
+// 文件位置：rust/crates/tools/src/lib.rs
+// 功能：内置工具定义、工具注册表、工具执行、权限检查
+// ============================================================
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+// API 模块 - API 客户端和类型
 use api::{
     max_tokens_for_model, model_family_identity_for, resolve_model_alias, ApiError,
     ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest, MessageResponse,
     OutputContentBlock, ProviderClient, StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition,
     ToolResultContentBlock,
 };
+
+// Plugins 模块 - 插件工具
 use plugins::PluginTool;
+
+// Reqwest - HTTP 客户端
 use reqwest::blocking::Client;
+
+// Runtime 模块 - 运行时组件
 use runtime::{
     check_freshness, dedupe_superseded_commit_events, edit_file_in_workspace, execute_bash,
     glob_search_in_workspace, grep_search_in_workspace, load_system_prompt,
@@ -29,40 +42,51 @@ use runtime::{
     PermissionMode, PermissionPolicy, PromptCacheEvent, ProviderFallbackConfig, RuntimeError,
     Session, TaskPacket, ToolError, ToolExecutor,
 };
+
+// Serde - JSON 序列化
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-/// Global task registry shared across tool invocations within a session.
+// ============================================================
+// 全局注册表（单例模式）
+// ============================================================
+
+/// 全局 LSP 注册表 - 用于代码智能提示
 fn global_lsp_registry() -> &'static LspRegistry {
     use std::sync::OnceLock;
     static REGISTRY: OnceLock<LspRegistry> = OnceLock::new();
     REGISTRY.get_or_init(LspRegistry::new)
 }
 
+/// 全局 MCP 工具注册表 - 用于 MCP 工具发现和执行
 fn global_mcp_registry() -> &'static McpToolRegistry {
     use std::sync::OnceLock;
     static REGISTRY: OnceLock<McpToolRegistry> = OnceLock::new();
     REGISTRY.get_or_init(McpToolRegistry::new)
 }
 
+/// 全局团队注册表 - 用于团队任务管理
 fn global_team_registry() -> &'static TeamRegistry {
     use std::sync::OnceLock;
     static REGISTRY: OnceLock<TeamRegistry> = OnceLock::new();
     REGISTRY.get_or_init(TeamRegistry::new)
 }
 
+/// 全局定时任务注册表 - 用于定时任务管理
 fn global_cron_registry() -> &'static CronRegistry {
     use std::sync::OnceLock;
     static REGISTRY: OnceLock<CronRegistry> = OnceLock::new();
     REGISTRY.get_or_init(CronRegistry::new)
 }
 
+/// 全局任务注册表 - 用于后台任务管理
 fn global_task_registry() -> &'static TaskRegistry {
     use std::sync::OnceLock;
     static REGISTRY: OnceLock<TaskRegistry> = OnceLock::new();
     REGISTRY.get_or_init(TaskRegistry::new)
 }
 
+/// 全局 Worker 注册表 - 用于 Worker 任务管理
 fn global_worker_registry() -> &'static WorkerRegistry {
     use std::sync::OnceLock;
     static REGISTRY: OnceLock<WorkerRegistry> = OnceLock::new();
@@ -76,22 +100,26 @@ pub struct ToolManifestEntry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 工具来源类型
 pub enum ToolSource {
-    Base,
-    Conditional,
+    Base,        // 基础工具（内置）
+    Conditional, // 条件工具（需要特定条件才可用）
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// 工具注册表条目集合
 pub struct ToolRegistry {
-    entries: Vec<ToolManifestEntry>,
+    entries: Vec<ToolManifestEntry>,  // 工具清单条目列表
 }
 
 impl ToolRegistry {
+    /// 创建新的工具注册表
     #[must_use]
     pub fn new(entries: Vec<ToolManifestEntry>) -> Self {
         Self { entries }
     }
 
+    /// 获取所有条目
     #[must_use]
     pub fn entries(&self) -> &[ToolManifestEntry] {
         &self.entries
@@ -99,29 +127,33 @@ impl ToolRegistry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// 工具规范定义 - 描述一个工具的名称、描述、输入模式和所需权限
 pub struct ToolSpec {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub input_schema: Value,
-    pub required_permission: PermissionMode,
+    pub name: &'static str,                    // 工具名称
+    pub description: &'static str,             // 工具描述
+    pub input_schema: Value,                   // JSON 输入模式
+    pub required_permission: PermissionMode,   // 所需权限级别
 }
 
 #[derive(Debug, Clone)]
+/// 全局工具注册表 - 管理所有可用工具（内置 + 插件 + 运行时）
 pub struct GlobalToolRegistry {
-    plugin_tools: Vec<PluginTool>,
-    runtime_tools: Vec<RuntimeToolDefinition>,
-    enforcer: Option<PermissionEnforcer>,
+    plugin_tools: Vec<PluginTool>,             // 插件提供的工具
+    runtime_tools: Vec<RuntimeToolDefinition>, // 运行时定义的工具
+    enforcer: Option<PermissionEnforcer>,      // 权限执行器
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// 运行时工具定义 - 动态添加的工具
 pub struct RuntimeToolDefinition {
-    pub name: String,
-    pub description: Option<String>,
-    pub input_schema: Value,
-    pub required_permission: PermissionMode,
+    pub name: String,                           // 工具名称
+    pub description: Option<String>,            // 工具描述
+    pub input_schema: Value,                    // JSON 输入模式
+    pub required_permission: PermissionMode,    // 所需权限级别
 }
 
 impl GlobalToolRegistry {
+    /// 创建仅包含内置工具的注册表
     #[must_use]
     pub fn builtin() -> Self {
         Self {
@@ -131,22 +163,26 @@ impl GlobalToolRegistry {
         }
     }
 
+    /// 添加插件工具（会检查与内置工具的冲突）
     pub fn with_plugin_tools(plugin_tools: Vec<PluginTool>) -> Result<Self, String> {
+        // 获取所有内置工具名称
         let builtin_names = mvp_tool_specs()
             .into_iter()
             .map(|spec| spec.name.to_string())
             .collect::<BTreeSet<_>>();
         let mut seen_plugin_names = BTreeSet::new();
 
+        // 检查插件工具是否与内置工具冲突
         for tool in &plugin_tools {
             let name = tool.definition().name.clone();
             if builtin_names.contains(&name) {
                 return Err(format!(
-                    "plugin tool `{name}` conflicts with a built-in tool name"
+                    "插件工具 `{name}` 与内置工具名称冲突"
                 ));
             }
+            // 检查重复的插件工具名称
             if !seen_plugin_names.insert(name.clone()) {
-                return Err(format!("duplicate plugin tool name `{name}`"));
+                return Err(format!("重复的插件工具名称 `{name}`"));
             }
         }
 
@@ -157,10 +193,12 @@ impl GlobalToolRegistry {
         })
     }
 
+    /// 添加运行时工具（会检查与内置和插件工具的冲突）
     pub fn with_runtime_tools(
         mut self,
         runtime_tools: Vec<RuntimeToolDefinition>,
     ) -> Result<Self, String> {
+        // 收集所有已存在的工具名称
         let mut seen_names = mvp_tool_specs()
             .into_iter()
             .map(|spec| spec.name.to_string())
@@ -171,6 +209,7 @@ impl GlobalToolRegistry {
             )
             .collect::<BTreeSet<_>>();
 
+        // 检查运行时工具是否与现有工具冲突
         for tool in &runtime_tools {
             if !seen_names.insert(tool.name.clone()) {
                 return Err(format!(
@@ -285,19 +324,23 @@ impl GlobalToolRegistry {
         builtin.chain(runtime).chain(plugin).collect()
     }
 
+    /// 获取工具权限规范列表
     pub fn permission_specs(
         &self,
         allowed_tools: Option<&BTreeSet<String>>,
     ) -> Result<Vec<(String, PermissionMode)>, String> {
+        // 内置工具权限
         let builtin = mvp_tool_specs()
             .into_iter()
             .filter(|spec| allowed_tools.is_none_or(|allowed| allowed.contains(spec.name)))
             .map(|spec| (spec.name.to_string(), spec.required_permission));
+        // 运行时工具权限
         let runtime = self
             .runtime_tools
             .iter()
             .filter(|tool| allowed_tools.is_none_or(|allowed| allowed.contains(tool.name.as_str())))
             .map(|tool| (tool.name.clone(), tool.required_permission));
+        // 插件工具权限
         let plugin = self
             .plugin_tools
             .iter()
@@ -310,21 +353,24 @@ impl GlobalToolRegistry {
                     .map(|permission| (tool.definition().name.clone(), permission))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        // 合并所有权限规范
         Ok(builtin.chain(runtime).chain(plugin).collect())
     }
 
+    /// 检查是否存在指定名称的运行时工具
     #[must_use]
     pub fn has_runtime_tool(&self, name: &str) -> bool {
         self.runtime_tools.iter().any(|tool| tool.name == name)
     }
 
+    /// 搜索工具
     #[must_use]
     pub fn search(
         &self,
-        query: &str,
-        max_results: usize,
-        pending_mcp_servers: Option<Vec<String>>,
-        mcp_degraded: Option<McpDegradedReport>,
+        query: &str,                                      // 搜索查询
+        max_results: usize,                               // 最大返回结果数
+        pending_mcp_servers: Option<Vec<String>>,         // 待处理的 MCP 服务器列表
+        mcp_degraded: Option<McpDegradedReport>,          // MCP 降级报告
     ) -> ToolSearchOutput {
         let query = query.trim().to_string();
         let normalized_query = normalize_tool_search_query(&query);
@@ -340,191 +386,234 @@ impl GlobalToolRegistry {
         }
     }
 
+    /// 设置权限执行器
     pub fn set_enforcer(&mut self, enforcer: PermissionEnforcer) {
         self.enforcer = Some(enforcer);
     }
 
+    /// 执行工具
     pub fn execute(&self, name: &str, input: &Value) -> Result<String, String> {
+        // 优先检查内置工具
         if mvp_tool_specs().iter().any(|spec| spec.name == name) {
             return execute_tool_with_enforcer(self.enforcer.as_ref(), name, input);
         }
+        // 检查插件工具
         self.plugin_tools
             .iter()
             .find(|tool| tool.definition().name == name)
-            .ok_or_else(|| format!("unsupported tool: {name}"))?
+            .ok_or_else(|| format!("不支持的工具: {name}"))?
             .execute(input)
             .map_err(|error| error.to_string())
     }
 
+    /// 获取可搜索的工具规范列表
     fn searchable_tool_specs(&self) -> Vec<SearchableToolSpec> {
+        // 内置工具
         let builtin = deferred_tool_specs()
             .into_iter()
             .map(|spec| SearchableToolSpec {
                 name: spec.name.to_string(),
                 description: spec.description.to_string(),
             });
+        // 运行时工具
         let runtime = self.runtime_tools.iter().map(|tool| SearchableToolSpec {
             name: tool.name.clone(),
             description: tool.description.clone().unwrap_or_default(),
         });
+        // 插件工具
         let plugin = self.plugin_tools.iter().map(|tool| SearchableToolSpec {
             name: tool.definition().name.clone(),
             description: tool.definition().description.clone().unwrap_or_default(),
         });
+        // 合并所有可搜索的工具
         builtin.chain(runtime).chain(plugin).collect()
     }
 }
 
+/// 标准化工具名称（统一命名格式）
 fn normalize_tool_name(value: &str) -> String {
     value.trim().replace('-', "_").to_ascii_lowercase()
 }
 
+/// 将插件权限字符串转换为 PermissionMode
 fn permission_mode_from_plugin(value: &str) -> Result<PermissionMode, String> {
     match value {
-        "read-only" => Ok(PermissionMode::ReadOnly),
-        "workspace-write" => Ok(PermissionMode::WorkspaceWrite),
-        "danger-full-access" => Ok(PermissionMode::DangerFullAccess),
-        other => Err(format!("unsupported plugin permission: {other}")),
+        "read-only" => Ok(PermissionMode::ReadOnly),           // 只读
+        "workspace-write" => Ok(PermissionMode::WorkspaceWrite), // 工作区写入
+        "danger-full-access" => Ok(PermissionMode::DangerFullAccess), // 完全访问
+        other => Err(format!("不支持的插件权限: {other}")),
     }
 }
 
+/// MVP 工具规范列表 - 返回所有内置工具的规范定义
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn mvp_tool_specs() -> Vec<ToolSpec> {
     vec![
+        // ============================================================
+        // 1. bash - 执行 Shell 命令
+        // 权限：DangerFullAccess（危险：完全访问）
+        // ============================================================
         ToolSpec {
             name: "bash",
-            description: "Execute a shell command in the current workspace.",
+            description: "在当前工作区执行 Shell 命令",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string" },
-                    "timeout": { "type": "integer", "minimum": 1 },
-                    "description": { "type": "string" },
-                    "run_in_background": { "type": "boolean" },
-                    "dangerouslyDisableSandbox": { "type": "boolean" },
-                    "namespaceRestrictions": { "type": "boolean" },
-                    "isolateNetwork": { "type": "boolean" },
-                    "filesystemMode": { "type": "string", "enum": ["off", "workspace-only", "allow-list"] },
-                    "allowedMounts": { "type": "array", "items": { "type": "string" } }
+                    "command": { "type": "string" },  // 要执行的命令
+                    "timeout": { "type": "integer", "minimum": 1 },  // 超时时间（毫秒）
+                    "description": { "type": "string" },  // 命令描述
+                    "run_in_background": { "type": "boolean" },  // 后台运行
+                    "dangerouslyDisableSandbox": { "type": "boolean" },  // 禁用沙箱
+                    "namespaceRestrictions": { "type": "boolean" },  // 命名空间限制
+                    "isolateNetwork": { "type": "boolean" },  // 隔离网络
+                    "filesystemMode": { "type": "string", "enum": ["off", "workspace-only", "allow-list"] },  // 文件系统模式
+                    "allowedMounts": { "type": "array", "items": { "type": "string" } }  // 允许的挂载点
                 },
                 "required": ["command"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::DangerFullAccess,
         },
+        // ============================================================
+        // 2. read_file - 读取文件
+        // 权限：ReadOnly（只读）
+        // ============================================================
         ToolSpec {
             name: "read_file",
-            description: "Read a text file from the workspace.",
+            description: "从工作区读取文本文件",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string" },
-                    "offset": { "type": "integer", "minimum": 0 },
-                    "limit": { "type": "integer", "minimum": 1 }
+                    "path": { "type": "string" },  // 文件路径
+                    "offset": { "type": "integer", "minimum": 0 },  // 起始行号
+                    "limit": { "type": "integer", "minimum": 1 }   // 限制行数
                 },
                 "required": ["path"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
         },
+        // ============================================================
+        // 3. write_file - 写入文件
+        // 权限：WorkspaceWrite（工作区写入）
+        // ============================================================
         ToolSpec {
             name: "write_file",
-            description: "Write a text file in the workspace.",
+            description: "在工作区写入文本文件",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string" },
-                    "content": { "type": "string" }
+                    "path": { "type": "string" },  // 文件路径
+                    "content": { "type": "string" }  // 文件内容
                 },
                 "required": ["path", "content"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
         },
+        // ============================================================
+        // 4. edit_file - 编辑文件
+        // 权限：WorkspaceWrite（工作区写入）
+        // ============================================================
         ToolSpec {
             name: "edit_file",
-            description: "Replace text in a workspace file.",
+            description: "替换工作区文件中的文本",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string" },
-                    "old_string": { "type": "string" },
-                    "new_string": { "type": "string" },
-                    "replace_all": { "type": "boolean" }
+                    "path": { "type": "string" },  // 文件路径
+                    "old_string": { "type": "string" },  // 要替换的文本
+                    "new_string": { "type": "string" },  // 替换后的文本
+                    "replace_all": { "type": "boolean" }  // 是否替换所有匹配
                 },
                 "required": ["path", "old_string", "new_string"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
         },
+        // ============================================================
+        // 5. glob_search - 文件名搜索
+        // 权限：ReadOnly（只读）
+        // ============================================================
         ToolSpec {
             name: "glob_search",
-            description: "Find files by glob pattern.",
+            description: "使用 glob 模式查找文件",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "pattern": { "type": "string" },
-                    "path": { "type": "string" }
+                    "pattern": { "type": "string" },  // glob 模式
+                    "path": { "type": "string" }     // 搜索路径
                 },
                 "required": ["pattern"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
         },
+        // ============================================================
+        // 6. grep_search - 内容搜索
+        // 权限：ReadOnly（只读）
+        // ============================================================
         ToolSpec {
             name: "grep_search",
-            description: "Search file contents with a regex pattern.",
+            description: "使用正则表达式搜索文件内容",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "pattern": { "type": "string" },
-                    "path": { "type": "string" },
-                    "glob": { "type": "string" },
-                    "output_mode": { "type": "string" },
-                    "-B": { "type": "integer", "minimum": 0 },
-                    "-A": { "type": "integer", "minimum": 0 },
-                    "-C": { "type": "integer", "minimum": 0 },
-                    "context": { "type": "integer", "minimum": 0 },
-                    "-n": { "type": "boolean" },
-                    "-i": { "type": "boolean" },
-                    "type": { "type": "string" },
-                    "head_limit": { "type": "integer", "minimum": 1 },
-                    "offset": { "type": "integer", "minimum": 0 },
-                    "multiline": { "type": "boolean" }
+                    "pattern": { "type": "string" },  // 正则表达式模式
+                    "path": { "type": "string" },     // 搜索路径
+                    "glob": { "type": "string" },     // 文件名过滤模式
+                    "output_mode": { "type": "string" },  // 输出模式
+                    "-B": { "type": "integer", "minimum": 0 },  // 匹配前行数
+                    "-A": { "type": "integer", "minimum": 0 },  // 匹配后行数
+                    "-C": { "type": "integer", "minimum": 0 },  // 上下文行数
+                    "context": { "type": "integer", "minimum": 0 },  // 上下文行数
+                    "-n": { "type": "boolean" },  // 显示行号
+                    "-i": { "type": "boolean" },  // 忽略大小写
+                    "type": { "type": "string" },  // 文件类型过滤
+                    "head_limit": { "type": "integer", "minimum": 1 },  // 结果数量限制
+                    "offset": { "type": "integer", "minimum": 0 },  // 起始偏移
+                    "multiline": { "type": "boolean" }  // 多行模式
                 },
                 "required": ["pattern"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
         },
+        // ============================================================
+        // 7. WebFetch - 获取网页内容
+        // 权限：ReadOnly（只读）
+        // ============================================================
         ToolSpec {
             name: "WebFetch",
-            description:
-                "Fetch a URL, convert it into readable text, and answer a prompt about it.",
+            description: "获取 URL 内容，转换为可读文本，并回答关于它的问题",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "url": { "type": "string", "format": "uri" },
-                    "prompt": { "type": "string" }
+                    "url": { "type": "string", "format": "uri" },  // 要获取的 URL
+                    "prompt": { "type": "string" }  // 关于内容的提问
                 },
                 "required": ["url", "prompt"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
         },
+        // ============================================================
+        // 8. WebSearch - 网络搜索
+        // 权限：ReadOnly（只读）
+        // ============================================================
         ToolSpec {
             name: "WebSearch",
-            description: "Search the web for current information and return cited results.",
+            description: "搜索网络获取当前信息并返回带引用的结果",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "minLength": 2 },
-                    "allowed_domains": {
+                    "query": { "type": "string", "minLength": 2 },  // 搜索查询
+                    "allowed_domains": {  // 允许的域名
                         "type": "array",
                         "items": { "type": "string" }
                     },
-                    "blocked_domains": {
+                    "blocked_domains": {  // 禁止的域名
                         "type": "array",
                         "items": { "type": "string" }
                     }
@@ -534,20 +623,24 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::ReadOnly,
         },
+        // ============================================================
+        // 9. TodoWrite - 更新任务列表
+        // 权限：WorkspaceWrite（工作区写入）
+        // ============================================================
         ToolSpec {
             name: "TodoWrite",
-            description: "Update the structured task list for the current session.",
+            description: "更新当前会话的结构化任务列表",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "todos": {
+                    "todos": {  // 任务列表
                         "type": "array",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "content": { "type": "string" },
-                                "activeForm": { "type": "string" },
-                                "status": {
+                                "content": { "type": "string" },  // 任务内容
+                                "activeForm": { "type": "string" },  // 进行时态描述
+                                "status": {  // 任务状态
                                     "type": "string",
                                     "enum": ["pending", "in_progress", "completed"]
                                 }
@@ -562,93 +655,117 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::WorkspaceWrite,
         },
+        // ============================================================
+        // 10. Skill - 加载技能
+        // 权限：ReadOnly（只读）
+        // ============================================================
         ToolSpec {
             name: "Skill",
-            description: "Load a local skill definition and its instructions.",
+            description: "加载本地技能定义及其指令",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "skill": { "type": "string" },
-                    "args": { "type": "string" }
+                    "skill": { "type": "string" },  // 技能名称
+                    "args": { "type": "string" }    // 技能参数
                 },
                 "required": ["skill"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
         },
+        // ============================================================
+        // 11. Agent - 启动代理任务
+        // 权限：DangerFullAccess（危险：完全访问）
+        // ============================================================
         ToolSpec {
             name: "Agent",
-            description: "Launch a specialized agent task and persist its handoff metadata.",
+            description: "启动专门的代理任务并持久化其交接元数据",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "description": { "type": "string" },
-                    "prompt": { "type": "string" },
-                    "subagent_type": { "type": "string" },
-                    "name": { "type": "string" },
-                    "model": { "type": "string" }
+                    "description": { "type": "string" },  // 任务描述
+                    "prompt": { "type": "string" },       // 代理提示
+                    "subagent_type": { "type": "string" }, // 子代理类型
+                    "name": { "type": "string" },         // 代理名称
+                    "model": { "type": "string" }         // 使用模型
                 },
                 "required": ["description", "prompt"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::DangerFullAccess,
         },
+        // ============================================================
+        // 12. ToolSearch - 搜索工具
+        // 权限：ReadOnly（只读）
+        // ============================================================
         ToolSpec {
             name: "ToolSearch",
-            description: "Search for deferred or specialized tools by exact name or keywords.",
+            description: "通过名称或关键词搜索延迟或专用工具",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string" },
-                    "max_results": { "type": "integer", "minimum": 1 }
+                    "query": { "type": "string" },  // 搜索查询
+                    "max_results": { "type": "integer", "minimum": 1 }  // 最大结果数
                 },
                 "required": ["query"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
         },
+        // ============================================================
+        // 13. NotebookEdit - 编辑 Jupyter 笔记本
+        // 权限：WorkspaceWrite（工作区写入）
+        // ============================================================
         ToolSpec {
             name: "NotebookEdit",
-            description: "Replace, insert, or delete a cell in a Jupyter notebook.",
+            description: "在 Jupyter 笔记本中替换、插入或删除单元格",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "notebook_path": { "type": "string" },
-                    "cell_id": { "type": "string" },
-                    "new_source": { "type": "string" },
-                    "cell_type": { "type": "string", "enum": ["code", "markdown"] },
-                    "edit_mode": { "type": "string", "enum": ["replace", "insert", "delete"] }
+                    "notebook_path": { "type": "string" },  // 笔记本路径
+                    "cell_id": { "type": "string" },        // 单元格 ID
+                    "new_source": { "type": "string" },     // 新内容
+                    "cell_type": { "type": "string", "enum": ["code", "markdown"] },  // 单元格类型
+                    "edit_mode": { "type": "string", "enum": ["replace", "insert", "delete"] }  // 编辑模式
                 },
                 "required": ["notebook_path"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
         },
+        // ============================================================
+        // 14. Sleep - 等待
+        // 权限：ReadOnly（只读）
+        // ============================================================
         ToolSpec {
             name: "Sleep",
-            description: "Wait for a specified duration without holding a shell process.",
+            description: "等待指定时长，不占用 shell 进程",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "duration_ms": { "type": "integer", "minimum": 0 }
+                    "duration_ms": { "type": "integer", "minimum": 0 }  // 等待毫秒数
                 },
                 "required": ["duration_ms"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
         },
+        // ============================================================
+        // 15. SendUserMessage - 发送用户消息
+        // 权限：ReadOnly（只读）
+        // ============================================================
         ToolSpec {
             name: "SendUserMessage",
-            description: "Send a message to the user.",
+            description: "向用户发送消息",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "message": { "type": "string" },
-                    "attachments": {
+                    "message": { "type": "string" },  // 消息内容
+                    "attachments": {  // 附件列表
                         "type": "array",
                         "items": { "type": "string" }
                     },
-                    "status": {
+                    "status": {  // 消息状态
                         "type": "string",
                         "enum": ["normal", "proactive"]
                     }
@@ -658,14 +775,18 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::ReadOnly,
         },
+        // ============================================================
+        // 16. Config - 获取/设置配置
+        // 权限：WorkspaceWrite（工作区写入）
+        // ============================================================
         ToolSpec {
             name: "Config",
-            description: "Get or set Claude Code settings.",
+            description: "获取或设置 Claude Code 设置",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "setting": { "type": "string" },
-                    "value": {
+                    "setting": { "type": "string" },  // 设置项名称
+                    "value": {  // 设置值
                         "type": ["string", "boolean", "number"]
                     }
                 },
@@ -674,9 +795,13 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::WorkspaceWrite,
         },
+        // ============================================================
+        // 17. EnterPlanMode - 进入计划模式
+        // 权限：WorkspaceWrite（工作区写入）
+        // ============================================================
         ToolSpec {
             name: "EnterPlanMode",
-            description: "Enable a worktree-local planning mode override and remember the previous local setting for ExitPlanMode.",
+            description: "启用工作区本地计划模式覆盖，并记住之前的设置以便 ExitPlanMode 恢复",
             input_schema: json!({
                 "type": "object",
                 "properties": {},
@@ -684,9 +809,13 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::WorkspaceWrite,
         },
+        // ============================================================
+        // 18. ExitPlanMode - 退出计划模式
+        // 权限：WorkspaceWrite（工作区写入）
+        // ============================================================
         ToolSpec {
             name: "ExitPlanMode",
-            description: "Restore or clear the worktree-local planning mode override created by EnterPlanMode.",
+            description: "恢复或清除由 EnterPlanMode 创建的工作区本地计划模式覆盖",
             input_schema: json!({
                 "type": "object",
                 "properties": {},
@@ -694,54 +823,88 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::WorkspaceWrite,
         },
+        // ============================================================
+        // 19. StructuredOutput - 结构化输出
+        // 权限：ReadOnly（只读）
+        // ============================================================
         ToolSpec {
             name: "StructuredOutput",
-            description: "Return structured output in the requested format.",
+            description: "以请求的格式返回结构化输出",
             input_schema: json!({
                 "type": "object",
                 "additionalProperties": true
             }),
             required_permission: PermissionMode::ReadOnly,
         },
+        // ============================================================
+        // 20. REPL - REPL 执行
+        // 权限：DangerFullAccess（危险：完全访问）
+        // ============================================================
         ToolSpec {
             name: "REPL",
-            description: "Execute code in a REPL-like subprocess.",
+            description: "在类似 REPL 的子进程中执行代码",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "code": { "type": "string" },
-                    "language": { "type": "string" },
-                    "timeout_ms": { "type": "integer", "minimum": 1 }
+                    "code": { "type": "string" },  // 要执行的代码
+                    "language": { "type": "string" },  // 编程语言
+                    "timeout_ms": { "type": "integer", "minimum": 1 }  // 超时时间（毫秒）
                 },
                 "required": ["code", "language"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::DangerFullAccess,
         },
+        // ============================================================
+        // 21. system_probe - 系统信息探针
+        // 权限：ReadOnly（只读）
+        // 适用于获取本机 CPU/内存/磁盘/网卡/显卡/主板/操作系统信息
+        // ============================================================
         ToolSpec {
-            name: "PowerShell",
-            description: "Execute a PowerShell command with optional timeout.",
+            name: "system_probe",
+            description: "收集本机硬件/系统信息（CPU、内存、磁盘、网卡、显卡、主板、操作系统）",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string" },
-                    "timeout": { "type": "integer", "minimum": 1 },
-                    "description": { "type": "string" },
-                    "run_in_background": { "type": "boolean" }
+                    "output_format": { "type": "string", "enum": ["text", "json"] },  // 输出格式
+                    "timeout_secs": { "type": "integer", "minimum": 1 }               // 收集超时（秒）
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        // ============================================================
+        // 22. PowerShell - 执行 PowerShell
+        // 权限：DangerFullAccess（危险：完全访问）
+        // ============================================================
+        ToolSpec {
+            name: "PowerShell",
+            description: "执行 PowerShell 命令（可选超时）",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string" },  // PowerShell 命令
+                    "timeout": { "type": "integer", "minimum": 1 },  // 超时时间（毫秒）
+                    "description": { "type": "string" },  // 命令描述
+                    "run_in_background": { "type": "boolean" }  // 后台运行
                 },
                 "required": ["command"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::DangerFullAccess,
         },
+        // ============================================================
+        // 22. AskUserQuestion - 询问用户
+        // 权限：ReadOnly（只读）
+        // ============================================================
         ToolSpec {
             name: "AskUserQuestion",
-            description: "Ask the user a question and wait for their response.",
+            description: "向用户提问并等待回答",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "question": { "type": "string" },
-                    "options": {
+                    "question": { "type": "string" },  // 问题内容
+                    "options": {  // 选项列表
                         "type": "array",
                         "items": { "type": "string" }
                     }
@@ -751,37 +914,45 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::ReadOnly,
         },
+        // ============================================================
+        // 23. TaskCreate - 创建后台任务
+        // 权限：DangerFullAccess（危险：完全访问）
+        // ============================================================
         ToolSpec {
             name: "TaskCreate",
-            description: "Create a background task that runs in a separate subprocess.",
+            description: "创建在独立子进程中运行的后台任务",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "prompt": { "type": "string" },
-                    "description": { "type": "string" }
+                    "prompt": { "type": "string" },  // 任务提示
+                    "description": { "type": "string" }  // 任务描述
                 },
                 "required": ["prompt"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::DangerFullAccess,
         },
+        // ============================================================
+        // 24. RunTaskPacket - 从任务包创建任务
+        // 权限：DangerFullAccess（危险：完全访问）
+        // ============================================================
         ToolSpec {
             name: "RunTaskPacket",
-            description: "Create a background task from a structured task packet.",
+            description: "从结构化任务包创建后台任务",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "objective": { "type": "string" },
-                    "scope": { "type": "string" },
-                    "repo": { "type": "string" },
-                    "branch_policy": { "type": "string" },
-                    "acceptance_tests": {
+                    "objective": { "type": "string" },  // 任务目标
+                    "scope": { "type": "string" },      // 任务范围
+                    "repo": { "type": "string" },       // 仓库路径
+                    "branch_policy": { "type": "string" },  // 分支策略
+                    "acceptance_tests": {  // 验收测试
                         "type": "array",
                         "items": { "type": "string" }
                     },
-                    "commit_policy": { "type": "string" },
-                    "reporting_contract": { "type": "string" },
-                    "escalation_policy": { "type": "string" }
+                    "commit_policy": { "type": "string" },  // 提交策略
+                    "reporting_contract": { "type": "string" },  // 报告合同
+                    "escalation_policy": { "type": "string" }   // 升级策略
                 },
                 "required": [
                     "objective",
@@ -797,22 +968,30 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::DangerFullAccess,
         },
+        // ============================================================
+        // 25. TaskGet - 获取任务状态
+        // 权限：ReadOnly（只读）
+        // ============================================================
         ToolSpec {
             name: "TaskGet",
-            description: "Get the status and details of a background task by ID.",
+            description: "根据 ID 获取后台任务的状态和详情",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "task_id": { "type": "string" }
+                    "task_id": { "type": "string" }  // 任务 ID
                 },
                 "required": ["task_id"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
         },
+        // ============================================================
+        // 26. TaskList - 列出任务
+        // 权限：ReadOnly（只读）
+        // ============================================================
         ToolSpec {
             name: "TaskList",
-            description: "List all background tasks and their current status.",
+            description: "列出所有后台任务及其当前状态",
             input_schema: json!({
                 "type": "object",
                 "properties": {},
@@ -820,27 +999,35 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::ReadOnly,
         },
+        // ============================================================
+        // 27. TaskStop - 停止任务
+        // 权限：DangerFullAccess（危险：完全访问）
+        // ============================================================
         ToolSpec {
             name: "TaskStop",
-            description: "Stop a running background task by ID.",
+            description: "根据 ID 停止运行中的后台任务",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "task_id": { "type": "string" }
+                    "task_id": { "type": "string" }  // 任务 ID
                 },
                 "required": ["task_id"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::DangerFullAccess,
         },
+        // ============================================================
+        // 28. TaskUpdate - 更新任务
+        // 权限：DangerFullAccess（危险：完全访问）
+        // ============================================================
         ToolSpec {
             name: "TaskUpdate",
-            description: "Send a message or update to a running background task.",
+            description: "向运行中的后台任务发送消息或更新",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "task_id": { "type": "string" },
-                    "message": { "type": "string" }
+                    "task_id": { "type": "string" },  // 任务 ID
+                    "message": { "type": "string" }   // 消息内容
                 },
                 "required": ["task_id", "message"],
                 "additionalProperties": false
@@ -1258,6 +1445,7 @@ fn execute_tool_with_enforcer(
             from_value::<StructuredOutputInput>(input).and_then(run_structured_output)
         }
         "REPL" => from_value::<ReplInput>(input).and_then(run_repl),
+        "system_probe" => from_value::<SystemProbeInput>(input).and_then(run_system_probe),
         "PowerShell" => {
             // Parse input to get the command for permission classification
             let ps_input: PowerShellInput = from_value(input)?;
@@ -2378,6 +2566,26 @@ fn run_powershell(input: PowerShellInput) -> Result<String, String> {
     to_pretty_json(execute_powershell(input).map_err(|error| error.to_string())?)
 }
 
+/// system_probe tool implementation
+///
+/// Returns local hardware/system info. Output formats:
+/// - "text" (default): human-readable Chinese report
+/// - "json": structured JSON
+fn run_system_probe(input: SystemProbeInput) -> Result<String, String> {
+    let mut probe = runtime::SystemProbe::new();
+    if let Some(secs) = input.timeout_secs {
+        probe = probe.with_timeout(secs);
+    }
+    let report = probe.collect();
+    let format = input.output_format.as_deref().unwrap_or("text");
+    match format {
+        "json" => probe
+            .to_json(&report)
+            .map_err(|error| error.to_string()),
+        _ => Ok(runtime::SystemProbe::render_text(&report)),
+    }
+}
+
 fn to_pretty_json<T: serde::Serialize>(value: T) -> Result<String, String> {
     serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
 }
@@ -2551,6 +2759,18 @@ struct PowerShellInput {
     timeout: Option<u64>,
     description: Option<String>,
     run_in_background: Option<bool>,
+}
+
+/// system_probe tool input
+/// Collect local hardware/system information: CPU, memory, disks, NIC, GPU, motherboard, OS
+#[derive(Debug, Default, Deserialize)]
+struct SystemProbeInput {
+    /// Output format: "text" (default, human-readable Chinese report) or "json" (structured)
+    #[serde(default)]
+    output_format: Option<String>,
+    /// Collection timeout in seconds, overrides default 30s
+    #[serde(default)]
+    timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6129,11 +6349,23 @@ fn detect_powershell_shell() -> std::io::Result<&'static str> {
 }
 
 fn command_exists(command: &str) -> bool {
-    std::process::Command::new("sh")
-        .arg("-lc")
-        .arg(format!("command -v {command} >/dev/null 2>&1"))
-        .status()
-        .is_ok_and(|status| status.success())
+    // On Windows, use where.exe to check if a command exists in PATH.
+    // The previous approach using `sh -lc "command -v ..."` fails because
+    // Git Bash's login shell resets PATH and ignores the process environment.
+    if cfg!(windows) {
+        std::process::Command::new("where.exe")
+            .arg(command)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    } else {
+        std::process::Command::new("sh")
+            .arg("-lc")
+            .arg(format!("command -v {command} >/dev/null 2>&1"))
+            .status()
+            .is_ok_and(|status| status.success())
+    }
 }
 
 #[allow(clippy::too_many_lines)]

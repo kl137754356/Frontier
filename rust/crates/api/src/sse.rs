@@ -1,11 +1,14 @@
 use crate::error::ApiError;
 use crate::types::StreamEvent;
+use std::collections::VecDeque;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SseParser {
     buffer: Vec<u8>,
     provider: Option<String>,
     model: Option<String>,
+    /// Queue of complete frames waiting to be parsed
+    frame_queue: VecDeque<String>,
 }
 
 impl SseParser {
@@ -25,11 +28,19 @@ impl SseParser {
         self
     }
 
+    /// Push a chunk and return any complete events found
+    /// Events are returned as soon as they're parsed, enabling real-time processing
     pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<StreamEvent>, ApiError> {
         self.buffer.extend_from_slice(chunk);
         let mut events = Vec::new();
 
-        while let Some(frame) = self.next_frame() {
+        // First, extract any complete frames from the buffer
+        while let Some(frame) = self.extract_next_frame() {
+            self.frame_queue.push_back(frame);
+        }
+
+        // Then parse all complete frames in the queue
+        while let Some(frame) = self.frame_queue.pop_front() {
             if let Some(event) = self.parse_frame_with_context(&frame)? {
                 events.push(event);
             }
@@ -38,25 +49,35 @@ impl SseParser {
         Ok(events)
     }
 
+    /// Parse any remaining buffered data
     pub fn finish(&mut self) -> Result<Vec<StreamEvent>, ApiError> {
-        if self.buffer.is_empty() {
+        if self.buffer.is_empty() && self.frame_queue.is_empty() {
             return Ok(Vec::new());
         }
 
-        let trailing = std::mem::take(&mut self.buffer);
-        match self.parse_frame_with_context(&String::from_utf8_lossy(&trailing))? {
-            Some(event) => Ok(vec![event]),
-            None => Ok(Vec::new()),
+        let mut events = Vec::new();
+
+        // Try to parse any remaining frame in the queue
+        while let Some(frame) = self.frame_queue.pop_front() {
+            if let Some(event) = self.parse_frame_with_context(&frame)? {
+                events.push(event);
+            }
         }
+
+        // Handle any trailing data that didn't form a complete frame
+        if !self.buffer.is_empty() {
+            let trailing = std::mem::take(&mut self.buffer);
+            if let Some(event) = self.parse_frame_with_context(&String::from_utf8_lossy(&trailing))? {
+                events.push(event);
+            }
+        }
+
+        Ok(events)
     }
 
-    fn parse_frame_with_context(&self, frame: &str) -> Result<Option<StreamEvent>, ApiError> {
-        let provider = self.provider.as_deref().unwrap_or("unknown");
-        let model = self.model.as_deref().unwrap_or("unknown");
-        parse_frame_with_provider(frame, provider, model)
-    }
-
-    fn next_frame(&mut self) -> Option<String> {
+    /// Extract the next complete frame from the buffer
+    /// Returns None if no complete frame found
+    fn extract_next_frame(&mut self) -> Option<String> {
         let separator = self
             .buffer
             .windows(2)
@@ -72,10 +93,31 @@ impl SseParser {
         let (position, separator_len) = separator;
         let frame = self
             .buffer
-            .drain(..position + separator_len)
+            .drain(..position)
             .collect::<Vec<_>>();
-        let frame_len = frame.len().saturating_sub(separator_len);
-        Some(String::from_utf8_lossy(&frame[..frame_len]).into_owned())
+        let frame = String::from_utf8_lossy(&frame).into_owned();
+        
+        // Drain the separator as well
+        self.buffer.drain(..separator_len);
+        
+        Some(frame)
+    }
+
+    fn parse_frame_with_context(&self, frame: &str) -> Result<Option<StreamEvent>, ApiError> {
+        let provider = self.provider.as_deref().unwrap_or("unknown");
+        let model = self.model.as_deref().unwrap_or("unknown");
+        parse_frame_with_provider(frame, provider, model)
+    }
+}
+
+impl Default for SseParser {
+    fn default() -> Self {
+        Self {
+            buffer: Vec::new(),
+            provider: None,
+            model: None,
+            frame_queue: VecDeque::new(),
+        }
     }
 }
 
