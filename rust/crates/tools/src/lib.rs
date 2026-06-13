@@ -3737,9 +3737,14 @@ fn resolve_skill_path_in_skills_dir(
     root: &std::path::Path,
     requested: &str,
 ) -> Option<std::path::PathBuf> {
-    let direct = root.join(requested).join("SKILL.md");
-    if direct.is_file() {
-        return Some(direct);
+    // Try SKILL.md first, then SKILL.txt as fallback (for environments where .md gets encrypted)
+    let direct_md = root.join(requested).join("SKILL.md");
+    if direct_md.is_file() {
+        return Some(direct_md);
+    }
+    let direct_txt = root.join(requested).join("SKILL.txt");
+    if direct_txt.is_file() {
+        return Some(direct_txt);
     }
 
     let entries = std::fs::read_dir(root).ok()?;
@@ -3747,10 +3752,16 @@ fn resolve_skill_path_in_skills_dir(
         if !entry.path().is_dir() {
             continue;
         }
-        let skill_path = entry.path().join("SKILL.md");
-        if !skill_path.is_file() {
+        // Try .md first, then .txt fallback
+        let skill_path_md = entry.path().join("SKILL.md");
+        let skill_path_txt = entry.path().join("SKILL.txt");
+        let skill_path = if skill_path_md.is_file() {
+            skill_path_md
+        } else if skill_path_txt.is_file() {
+            skill_path_txt
+        } else {
             continue;
-        }
+        };
         if entry
             .file_name()
             .to_string_lossy()

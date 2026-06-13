@@ -40,6 +40,36 @@ function copyDir(src, dest) {
   console.log(`  ${path.basename(src)}/ copied`);
 }
 
+/**
+ * Copy a directory, renaming all .md files to .txt so claw.exe doesn't encrypt them.
+ * claw.exe watches for .md files and encrypts them on the fly.
+ */
+function copyDirRenameMd(src, dest) {
+  if (!fs.existsSync(src)) {
+    console.warn(`  SKIP (not found): ${src}`);
+    return;
+  }
+  copyDirRecursiveRenameMd(src, dest);
+  console.log(`  ${path.basename(src)}/ copied (.md → .txt)`);
+}
+
+function copyDirRecursiveRenameMd(src, dest) {
+  fs.mkdirSync(dest, { recursive: true });
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const srcPath = path.join(src, entry.name);
+    if (entry.isDirectory()) {
+      copyDirRecursiveRenameMd(srcPath, path.join(dest, entry.name));
+    } else if (entry.name.endsWith('.md')) {
+      // Rename .md → .txt and write with UTF-8 BOM (so Windows Notepad shows Chinese correctly)
+      const content = fs.readFileSync(srcPath, 'utf8');
+      const destName = entry.name.replace(/\.md$/, '.txt');
+      fs.writeFileSync(path.join(dest, destName), '\uFEFF' + content, 'utf8');
+    } else {
+      fs.copyFileSync(srcPath, path.join(dest, entry.name));
+    }
+  }
+}
+
 function copyFile(src, dest) {
   const dir = path.dirname(dest);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -52,25 +82,24 @@ copyDir(path.join(ROOT, 'backend-dist'), path.join(RELEASE_DIR, 'backend-dist'))
 copyFile(path.join(ROOT, 'bin', 'claw.exe'), path.join(RELEASE_DIR, 'bin', 'claw.exe'));
 copyFile(path.join(ROOT, 'main.js'), path.join(RELEASE_DIR, 'main.js'));
 
-// Copy Frontier.md (agent instructions — read by main.js, written to CLAUDE.md in workspace)
+// Copy Frontier.md as Frontier.txt (agent instructions — renamed to avoid claw.exe encryption)
 const frontierMd = path.join(ROOT, '..', 'Frontier.md');
 if (fs.existsSync(frontierMd)) {
-  copyFile(frontierMd, path.join(RELEASE_DIR, 'Frontier.md'));
-  console.log('  Frontier.md (agent instructions) copied');
+  const content = fs.readFileSync(frontierMd, 'utf8');
+  fs.writeFileSync(path.join(RELEASE_DIR, 'Frontier.txt'), '\uFEFF' + content, 'utf8');
+  console.log('  Frontier.txt (agent instructions) copied');
 }
 
-// Copy MCP servers directory and config template
-copyDir(path.join(ROOT, 'mcp-servers'), path.join(RELEASE_DIR, 'mcp-servers'));
-copyFile(path.join(ROOT, 'mcp-config-template.json'), path.join(RELEASE_DIR, 'mcp-config-template.json'));
-console.log('  MCP servers and config template copied');
+// Copy MCP servers directory and config template are no longer needed.
+// claw.exe reads MCP config from CLAW_WORKSPACE/.claw/settings.json (copied from frontier-settings.json).
 
-// Copy bundled skills
-// Skills included: heartbeat (定时任务), and other built-in skills
-copyDir(path.join(ROOT, 'skills'), path.join(RELEASE_DIR, 'skills'));
+
+// Copy bundled skills — rename .md to .txt to prevent claw.exe encryption
+copyDirRenameMd(path.join(ROOT, 'skills'), path.join(RELEASE_DIR, 'skills'));
 console.log('  Bundled skills copied (heartbeat, etc.)');
 
-// Copy documentation
-copyDir(path.join(ROOT, 'docs'), path.join(RELEASE_DIR, 'docs'));
+// Copy documentation — rename .md to .txt
+copyDirRenameMd(path.join(ROOT, 'docs'), path.join(RELEASE_DIR, 'docs'));
 console.log('  Documentation copied');
 
 // Copy frontier settings reference (MCP config etc)

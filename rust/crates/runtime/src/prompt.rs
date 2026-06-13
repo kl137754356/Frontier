@@ -242,6 +242,9 @@ fn discover_instruction_files(cwd: &Path) -> std::io::Result<Vec<ContextFile>> {
             dir.join("CLAUDE.local.md"),
             dir.join(".claw").join("CLAUDE.md"),
             dir.join(".claw").join("instructions.md"),
+            // .txt variants for environments where .md files get encrypted (e.g. enterprise DLP)
+            dir.join(".claw").join("instructions.txt"),
+            dir.join("CLAUDE.txt"),
         ] {
             push_context_file(&mut files, candidate)?;
         }

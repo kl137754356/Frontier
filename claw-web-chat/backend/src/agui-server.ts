@@ -94,10 +94,60 @@ interface HeartbeatTask {
   stopped: boolean; // 新增：停止标志，用于立即停止正在运行的任务
 }
 const heartbeatTasks: Map<string, HeartbeatTask> = new Map();
-// Buffer for heartbeat results when no SSE is active
-let heartbeatResultBuffer: string[] = [];
-// Persistent SSE connections for heartbeat results
+// Buffer for heartbeat results — each entry has a unique id to allow frontend deduplication
+let heartbeatResultBuffer: Array<{ id: string; text: string }> = [];
 const heartbeatSSEClients: Set<ServerResponse> = new Set();
+
+// Heartbeat queue — serializes execution so only one heartbeat runs at a time
+const heartbeatQueue: Array<{ id: string; prompt: string; task: HeartbeatTask }> = [];
+let heartbeatRunning: { resultText: string; task: HeartbeatTask } | null = null;
+let userRunActive = false;
+
+// Called when a TCP message arrives — routes to heartbeat handler if heartbeat is active
+function handleHeartbeatTcpMsg(msg: TcpServerMessage): boolean {
+  if (!heartbeatRunning) return false;
+  const run = heartbeatRunning;
+  if (msg.type === 'chunk') {
+    run.resultText += (msg as any).text || '';
+    return true;
+  }
+  if (msg.type === 'done' || msg.type === 'error') {
+    if (msg.type === 'done' && !run.task.stopped && run.resultText.trim()) {
+      heartbeatResultBuffer.push({
+        id: `hbr-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        text: `[${new Date().toLocaleTimeString()}] ${run.resultText.trim()}`,
+      });
+      if (heartbeatResultBuffer.length > 20) heartbeatResultBuffer.shift();
+    }
+    heartbeatRunning = null;
+    setTimeout(() => drainHeartbeatQueue(), 0); // yield before next drain
+    return true;
+  }
+  return false;
+}
+
+function drainHeartbeatQueue(): void {
+  if (heartbeatRunning || userRunActive || heartbeatQueue.length === 0) return;
+  // Skip stopped/disconnected items
+  while (heartbeatQueue.length > 0) {
+    const item = heartbeatQueue[0];
+    if (item.task.stopped || !tcpBridge.isConnected()) {
+      heartbeatQueue.shift();
+      continue;
+    }
+    heartbeatQueue.shift();
+    heartbeatRunning = { resultText: '', task: item.task };
+    console.log(`[Heartbeat] Executing task '${item.id}': ${item.prompt.slice(0, 50)}`);
+    tcpBridge.sendPrompt(`[自动心跳，直接执行不要提问不要选择框，用纯文字简洁报告] ${item.prompt}`);
+    return;
+  }
+}
+
+// Background TCP message handler — active when no user run is in progress
+// Handles heartbeat responses so they're captured even without an active SSE connection
+function backgroundMessageHandler(msg: TcpServerMessage): void {
+  handleHeartbeatTcpMsg(msg);
+}
 
 function addHeartbeatTask(id: string, prompt: string, intervalMs: number): HeartbeatTask {
   // Remove existing task with same id
@@ -110,32 +160,14 @@ function addHeartbeatTask(id: string, prompt: string, intervalMs: number): Heart
       return;
     }
 
-    // Only send if TCP connected (no need to wait for activeSSEResponse to be null)
-    // Heart beat tasks run independently of user-facing SSE responses
+    // Only send if TCP connected
     if (tcpBridge.isConnected()) {
-      console.log(`[Heartbeat] Executing task '${id}': ${prompt.slice(0, 50)}`);
+      if (task.stopped) return;
+      console.log(`[Heartbeat] Queuing task '${id}': ${prompt.slice(0, 50)}`);
       task.lastRun = Date.now();
       task.runCount++;
-
-      // Register a temporary listener to capture heartbeat results
-      let resultText = '';
-      const heartbeatListener = (msg: TcpServerMessage) => {
-        if (msg.type === 'chunk') {
-          resultText += (msg as any).text || '';
-        } else if (msg.type === 'done') {
-          tcpBridge.off('message', heartbeatListener);
-          // 仅在任务未被停止时才添加结果
-          if (!task.stopped && resultText.trim()) {
-            heartbeatResultBuffer.push(`[${new Date().toLocaleTimeString()}] ${resultText.trim()}`);
-            // Keep only last 20 results
-            if (heartbeatResultBuffer.length > 20) heartbeatResultBuffer.shift();
-          }
-        }
-      };
-
-      // Register the listener for heartbeat result collection
-      tcpBridge.on('message', heartbeatListener);
-      tcpBridge.sendPrompt(`[自动心跳，直接执行不要提问不要选择框，用纯文字简洁报告] ${prompt}`);
+      heartbeatQueue.push({ id, prompt, task });
+      drainHeartbeatQueue();
     } else {
       console.log(`[Heartbeat] Skipped task '${id}' (TCP disconnected)`);
     }
@@ -148,11 +180,15 @@ function addHeartbeatTask(id: string, prompt: string, intervalMs: number): Heart
 function removeHeartbeatTask(id: string): boolean {
   const task = heartbeatTasks.get(id);
   if (task) {
-    // 设置停止标志，立即停止正在运行的任务
     task.stopped = true;
     if (task.timer) clearInterval(task.timer);
     heartbeatTasks.delete(id);
-    console.log(`[Heartbeat] Task '${id}' removed and stopped`);
+    // Remove any pending queue entries for this task
+    const before = heartbeatQueue.length;
+    heartbeatQueue.splice(0, heartbeatQueue.length,
+      ...heartbeatQueue.filter(item => item.id !== id)
+    );
+    console.log(`[Heartbeat] Task '${id}' removed and stopped (cleared ${before - heartbeatQueue.length} queued items)`);
     return true;
   }
   return false;
@@ -168,6 +204,10 @@ function clearAllHeartbeatTasks(): number {
     removeHeartbeatTask(id);
     count++;
   }
+  // Clear the queue and buffer so no stale results are sent to the frontend
+  heartbeatQueue.length = 0;
+  heartbeatResultBuffer = [];
+  console.log('[Heartbeat] All tasks cleared, queue and buffer flushed');
   return count;
 }
 
@@ -470,6 +510,9 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
 
   // Listen for TCP messages from claw-code
   const onMessage = (msg: TcpServerMessage) => {
+    // Route to heartbeat handler if a heartbeat run is currently active
+    if (heartbeatRunning && handleHeartbeatTcpMsg(msg)) return;
+
     // If response is closed (client disconnected), just track 'done' for draining
     if (res.writableEnded) {
       if (msg.type === 'done' || msg.type === 'error') {
@@ -756,12 +799,16 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
   };
 
   function cleanup() {
-    // Don't remove onMessage listener here — let it keep running to drain old messages
-    // and clear previousRunDraining when done arrives. onMessage already checks res.writableEnded.
     clearInterval(keepaliveTimer);
     activeSSEResponse = null;
     activeRunId = null;
     activeMessageId = null;
+    // Resume queued heartbeat tasks now that user run is complete
+    userRunActive = false;
+    // Register background listener to handle heartbeat TCP messages when no user run is active
+    tcpBridge.removeAllListeners('message');
+    tcpBridge.on('message', backgroundMessageHandler);
+    drainHeartbeatQueue();
   }
 
   // Handle client disconnect
@@ -782,6 +829,8 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
   }
 
   // Register the message handler for this run
+  // Block heartbeat queue while user request is active; cleanup() will resume it
+  userRunActive = true;
   tcpBridge.removeAllListeners('message');
   tcpBridge.on('message', onMessage);
 
@@ -869,6 +918,50 @@ async function handleReset(req: IncomingMessage, res: ServerResponse): Promise<v
   tcpBridge.sendReset();
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ status: 'ok' }));
+}
+
+// --- POST /cancel: Kill the current claw-code run ---
+// Restarts claw-code process to unblock any stuck PowerShell/bash command.
+// The frontend should reconnect via POST /config after calling this.
+async function handleCancel(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  setCorsHeaders(res);
+  console.log('[AgUiServer] Cancel requested — restarting claw-code to unblock stuck run');
+
+  // Close active SSE connection so frontend knows run is over
+  if (activeSSEResponse && !activeSSEResponse.writableEnded) {
+    sendSseEvent(activeSSEResponse, {
+      type: 'RUN_ERROR',
+      runId: activeRunId || 'unknown',
+      message: '[已中止] 用户取消了正在执行的操作',
+    });
+    activeSSEResponse.end();
+  }
+  activeSSEResponse = null;
+  activeRunId = null;
+  activeMessageId = null;
+  previousRunDraining = false;
+
+  // Restart claw-code — this kills any child processes (PowerShell, bash) it spawned
+  const config = clawProcess.getConfig();
+  if (config) {
+    try {
+      await clawProcess.stop();
+      tcpBridge.disconnect();
+      await clawProcess.start(config);
+      await tcpBridge.connect('127.0.0.1', config.port);
+      console.log('[AgUiServer] claw-code restarted successfully');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'restarted' }));
+    } catch (err) {
+      console.error('[AgUiServer] Failed to restart claw-code:', err);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Failed to restart' }));
+    }
+  } else {
+    // Not configured yet — just close anything active
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok' }));
+  }
 }
 
 // --- POST /slash: Execute slash command ---
@@ -1007,6 +1100,8 @@ const server = createServer(async (req, res) => {
       await handleConfig(req, res);
     } else if (req.method === 'POST' && req.url === '/reset') {
       await handleReset(req, res);
+    } else if (req.method === 'POST' && req.url === '/cancel') {
+      await handleCancel(req, res);
     } else if (req.method === 'POST' && req.url === '/slash') {
       await handleSlash(req, res);
     } else if (req.method === 'POST' && req.url === '/a2ui-event') {
@@ -1070,6 +1165,8 @@ const server = createServer(async (req, res) => {
 });
 
 // Logging
+// Register background handler initially (handles heartbeat TCP responses when no user run is active)
+tcpBridge.on('message', backgroundMessageHandler);
 tcpBridge.on('connected', () => { console.log('[AgUiServer] TCP connected to claw-code'); });
 tcpBridge.on('disconnected', () => {
   console.warn('[AgUiServer] TCP disconnected from claw-code');

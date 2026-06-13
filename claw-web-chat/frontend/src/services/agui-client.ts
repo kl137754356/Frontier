@@ -566,12 +566,46 @@ class AgUiClient {
     // Mark current streaming message as interrupted
     const store = useChatStore.getState();
     if (store.isStreaming) {
-      // Append interruption notice to current message
       if (store.streamingMessageId) {
-        store.appendChunk(sessionId, store.streamingMessageId, '\n\n*[已中断 — 正在处理新消息...]*');
+        // Find tools that were running (have tool_use but no matching tool_result)
+        const msgs = store.messages[sessionId] ?? [];
+        const streamingMsg = msgs.find(m => m.id === store.streamingMessageId);
+        const runningItems: string[] = [];
+        if (streamingMsg) {
+          for (const block of streamingMsg.content) {
+            if (block.type === 'tool_use') {
+              const hasResult = streamingMsg.content.some(
+                c => c.type === 'tool_result' && c.toolUseId === block.id
+              );
+              if (!hasResult) {
+                // Parse the input JSON and extract the most meaningful field
+                let detail = '';
+                try {
+                  const input = JSON.parse(block.input || '{}');
+                  // Priority: command > script > query > pattern > path > content (first 80 chars)
+                  const value =
+                    input.command ?? input.script ?? input.query ??
+                    input.pattern ?? input.path ?? input.content ?? null;
+                  if (value) {
+                    const str = String(value);
+                    detail = str.length > 80 ? str.slice(0, 80) + '…' : str;
+                  }
+                } catch {/* ignore parse errors */}
+                const toolName = block.name.includes('/') ? block.name.split('/').slice(1).join('/') : block.name;
+                runningItems.push(detail ? `- **${toolName}**: \`${detail}\`` : `- **${toolName}**`);
+              }
+            }
+          }
+        }
+        const notice = runningItems.length > 0
+          ? `\n\n⛔ 已中断，停止了以下正在执行的操作：\n${runningItems.join('\n')}`
+          : '\n\n⛔ 已中断';
+        store.appendChunk(sessionId, store.streamingMessageId, notice);
       }
       store.finishStreaming(sessionId);
     }
+    // Tell backend to kill the stuck claw-code process (stops hung PowerShell/bash commands)
+    fetch('/cancel', { method: 'POST' }).catch(() => {/* ignore */});
   }
 
   // --- REST endpoints for non-streaming operations ---

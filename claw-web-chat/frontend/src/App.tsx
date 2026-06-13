@@ -142,6 +142,7 @@ function App() {
     }, 10000); // Check every 10 seconds
 
     // Poll for heartbeat results every 15 seconds
+    const seenHeartbeatIds = new Set<string>(); // deduplicate by server-assigned ID
     const heartbeatPoll = setInterval(async () => {
       try {
         const res = await fetch('/heartbeat-results', { signal: AbortSignal.timeout(3000) });
@@ -151,13 +152,20 @@ function App() {
             const state = useChatStore.getState();
             const sessionId = state.activeSessionId;
             if (sessionId) {
-              // Add heartbeat results as assistant messages
               for (const result of data.results) {
+                const id: string = typeof result === 'string' ? result : (result.id ?? String(Date.now()));
+                const text: string = typeof result === 'string' ? result : (result.text ?? JSON.stringify(result));
+                if (seenHeartbeatIds.has(id)) continue;
+                seenHeartbeatIds.add(id);
+                if (seenHeartbeatIds.size > 200) {
+                  const first = seenHeartbeatIds.values().next().value as string;
+                  seenHeartbeatIds.delete(first);
+                }
                 state.addMessage(sessionId, {
-                  id: `hb-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                  id: `hb-${id}`,
                   sessionId,
                   role: 'assistant',
-                  content: [{ type: 'text', text: `📊 **心跳报告**\n\n${result}` }],
+                  content: [{ type: 'text', text: `📊 **心跳报告**\n\n${text}` }],
                   timestamp: Date.now(),
                   status: 'complete',
                 });
@@ -166,7 +174,7 @@ function App() {
           }
         }
       } catch {}
-    }, 15000);
+    }, 5000); // Poll every 5s so heartbeat results appear promptly
 
     return () => { clearInterval(healthCheck); clearInterval(heartbeatPoll); };
   }, []);

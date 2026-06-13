@@ -2470,39 +2470,46 @@ fn handle_tcp_client(
             if let Ok(entries) = fs::read_dir(&skills_dir) {
                 for entry in entries.flatten() {
                     if entry.path().is_dir() {
+                        // Try SKILL.md first, then SKILL.txt as fallback (for encrypted .md environments)
                         let skill_md = entry.path().join("SKILL.md");
-                        if skill_md.is_file() {
-                            if let Ok(content) = fs::read_to_string(&skill_md) {
-                                let name = entry.file_name().to_string_lossy().to_string();
-                                // 提取 frontmatter 中的 description
-                                let description = content
-                                    .strip_prefix("---")
-                                    .and_then(|s| s.split_once("---"))
-                                    .map(|(fm, _)| {
-                                        fm.lines()
-                                            .skip_while(|l| !l.starts_with("description"))
-                                            .skip(1)
-                                            .take_while(|l| l.starts_with("  "))
-                                            .map(|l| l.trim())
-                                            .collect::<Vec<_>>()
-                                            .join(" ")
-                                    })
-                                    .unwrap_or_default();
-                                let desc = if description.is_empty() {
-                                    // 单行 description
-                                    content
-                                        .lines()
-                                        .find(|l| l.starts_with("description:"))
-                                        .map(|l| l.trim_start_matches("description:").trim().to_string())
-                                        .unwrap_or_default()
-                                } else {
-                                    description
-                                };
-                                let skill_path = entry.path().display().to_string();
-                                skills_content.push_str(&format!(
-                                    "\n- **{name}**: {desc}\n  路径: {skill_path}/SKILL.md\n"
-                                ));
-                            }
+                        let skill_txt = entry.path().join("SKILL.txt");
+                        let (skill_file, skill_file_name) = if skill_md.is_file() {
+                            (skill_md, "SKILL.md")
+                        } else if skill_txt.is_file() {
+                            (skill_txt, "SKILL.txt")
+                        } else {
+                            continue;
+                        };
+                        if let Ok(content) = fs::read_to_string(&skill_file) {
+                            let name = entry.file_name().to_string_lossy().to_string();
+                            // 提取 frontmatter 中的 description
+                            let description = content
+                                .strip_prefix("---")
+                                .and_then(|s| s.split_once("---"))
+                                .map(|(fm, _)| {
+                                    fm.lines()
+                                        .skip_while(|l| !l.starts_with("description"))
+                                        .skip(1)
+                                        .take_while(|l| l.starts_with("  "))
+                                        .map(|l| l.trim())
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
+                                })
+                                .unwrap_or_default();
+                            let desc = if description.is_empty() {
+                                // 单行 description
+                                content
+                                    .lines()
+                                    .find(|l| l.starts_with("description:"))
+                                    .map(|l| l.trim_start_matches("description:").trim().to_string())
+                                    .unwrap_or_default()
+                            } else {
+                                description
+                            };
+                            let skill_path = entry.path().display().to_string();
+                            skills_content.push_str(&format!(
+                                "\n- **{name}**: {desc}\n  路径: {skill_path}/{skill_file_name}\n"
+                            ));
                         }
                     }
                 }

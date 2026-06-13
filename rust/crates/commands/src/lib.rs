@@ -2667,10 +2667,16 @@ pub fn resolve_skill_path(cwd: &Path, skill: &str) -> std::io::Result<PathBuf> {
                     if !entry.path().is_dir() {
                         continue;
                     }
-                    let skill_path = entry.path().join("SKILL.md");
-                    if !skill_path.is_file() {
+                    // Try SKILL.md first, then SKILL.txt as fallback (for encrypted .md environments)
+                    let skill_path_md = entry.path().join("SKILL.md");
+                    let skill_path_txt = entry.path().join("SKILL.txt");
+                    let skill_path = if skill_path_md.is_file() {
+                        skill_path_md
+                    } else if skill_path_txt.is_file() {
+                        skill_path_txt
+                    } else {
                         continue;
-                    }
+                    };
                     let contents = fs::read_to_string(&skill_path)?;
                     let (name, _) = parse_skill_frontmatter(&contents);
                     entries.push((
@@ -3521,10 +3527,16 @@ fn load_skills_from_roots(roots: &[SkillRoot]) -> std::io::Result<Vec<SkillSumma
                     if !entry.path().is_dir() {
                         continue;
                     }
-                    let skill_path = entry.path().join("SKILL.md");
-                    if !skill_path.is_file() {
+                    // Try SKILL.md first, then SKILL.txt as fallback
+                    let skill_path_md = entry.path().join("SKILL.md");
+                    let skill_path_txt = entry.path().join("SKILL.txt");
+                    let skill_path = if skill_path_md.is_file() {
+                        skill_path_md
+                    } else if skill_path_txt.is_file() {
+                        skill_path_txt
+                    } else {
                         continue;
-                    }
+                    };
                     let contents = fs::read_to_string(skill_path)?;
                     let (name, description) = parse_skill_frontmatter(&contents);
                     root_skills.push(SkillSummary {

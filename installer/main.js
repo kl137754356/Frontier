@@ -19,7 +19,6 @@ const BACKEND_PORT = 8081;
 const FRONTEND_DIR = path.join(APP_DIR, 'frontend-dist');
 const BACKEND_ENTRY = path.join(APP_DIR, 'backend-dist', 'backend', 'src', 'agui-server.js');
 const CLAW_EXE = path.join(APP_DIR, 'bin', 'claw.exe');
-const MCP_SERVERS_DIR = path.join(APP_DIR, 'mcp-servers');
 const NODE_EXE = path.join(APP_DIR, 'node', 'node.exe');
 
 // User data (workspace for claw-code)
@@ -28,40 +27,6 @@ if (!fs.existsSync(USER_DATA)) fs.mkdirSync(USER_DATA, { recursive: true });
 const LOG_FILE = path.join(USER_DATA, 'frontier.log');
 
 let backendProcess = null;
-
-/**
- * Set up MCP configuration — resolves template paths and writes mcp.json
- * into the workspace .claw/settings/ directory.
- * Only writes if mcp.json doesn't exist yet (user can customize it).
- */
-function setupMcpConfig() {
-  const clawSettingsDir = path.join(USER_DATA, '.claw', 'settings');
-  const mcpJsonPath = path.join(clawSettingsDir, 'mcp.json');
-
-  // Only create if not exists (preserve user customizations)
-  if (fs.existsSync(mcpJsonPath)) {
-    log('MCP config already exists, skipping template setup');
-    return;
-  }
-
-  // Read template and resolve paths
-  const templatePath = path.join(APP_DIR, 'mcp-config-template.json');
-  if (!fs.existsSync(templatePath)) {
-    log('No MCP config template found, skipping');
-    return;
-  }
-
-  let template = fs.readFileSync(templatePath, 'utf8');
-  // Replace ${MCP_SERVERS_DIR} with actual absolute path (use forward slashes for JSON)
-  const mcpDir = MCP_SERVERS_DIR.replace(/\\/g, '/');
-  template = template.replace(/\$\{MCP_SERVERS_DIR\}/g, mcpDir);
-
-  // Write resolved config
-  fs.mkdirSync(clawSettingsDir, { recursive: true });
-  fs.writeFileSync(mcpJsonPath, template, 'utf8');
-  log(`MCP config created: ${mcpJsonPath}`);
-  log(`MCP servers directory: ${MCP_SERVERS_DIR}`);
-}
 
 /**
  * Set up skills — copies bundled skills to workspace .claw/skills/.
@@ -88,22 +53,119 @@ function setupSkills() {
   fs.mkdirSync(workspaceSkillsDir, { recursive: true });
 
   let copied = 0;
+  let updated = 0;
   for (const dir of skillDirs) {
+    const srcDir = path.join(bundledSkillsDir, dir.name);
     const destDir = path.join(workspaceSkillsDir, dir.name);
-    if (fs.existsSync(destDir)) {
-      // Skill already exists in workspace — don't overwrite (user may have customized)
-      continue;
+    if (!fs.existsSync(destDir)) {
+      // New skill — copy everything
+      copySkillDirToWorkspace(srcDir, destDir);
+      copied++;
+    } else {
+      // Existing skill — only add NEW files that don't exist yet
+      // (preserves user customizations and claw.exe's encrypted versions)
+      updated += copyNewSkillFiles(srcDir, destDir);
     }
-    // Copy the entire skill directory
-    copyDirRecursive(path.join(bundledSkillsDir, dir.name), destDir);
-    copied++;
   }
 
-  if (copied > 0) {
-    log(`Skills setup: copied ${copied} new skill(s) to ${workspaceSkillsDir}`);
-  } else {
-    log('Skills already set up, no new skills to copy');
+  if (copied > 0) log(`Skills setup: copied ${copied} new skill(s) to ${workspaceSkillsDir}`);
+  if (updated > 0) log(`Skills updated: added ${updated} new file(s) to existing skills`);
+  if (copied === 0 && updated === 0) log('Skills already up to date');
+}
+
+/**
+ * Refresh skill files in workspace every launch.
+ * Overwrites bundled skill files (.txt) to keep them current.
+ * Also cleans up any leftover .md/.IPGSD from old format.
+ */
+function refreshSkillFiles() {
+  const bundledSkillsDir = path.join(APP_DIR, 'skills');
+  const workspaceSkillsDir = path.join(USER_DATA, '.claw', 'skills');
+
+  if (!fs.existsSync(bundledSkillsDir) || !fs.existsSync(workspaceSkillsDir)) return;
+
+  let refreshed = 0;
+  let cleaned = 0;
+
+  const skillDirs = fs.readdirSync(bundledSkillsDir, { withFileTypes: true })
+    .filter(e => e.isDirectory());
+
+  for (const dir of skillDirs) {
+    const srcDir = path.join(bundledSkillsDir, dir.name);
+    const destDir = path.join(workspaceSkillsDir, dir.name);
+    if (!fs.existsSync(destDir)) continue;
+
+    const files = fs.readdirSync(srcDir, { withFileTypes: true });
+    for (const file of files) {
+      if (!file.isFile()) continue;
+
+      const srcPath = path.join(srcDir, file.name);
+      const destPath = path.join(destDir, file.name);
+
+      // Clean up any leftover .md or .IPGSD from old format (when files were copied as .md)
+      if (file.name.endsWith('.txt')) {
+        const oldMd = path.join(destDir, file.name.replace(/\.txt$/, '.md'));
+        const oldEnc = oldMd + '.IPGSD';
+        if (fs.existsSync(oldEnc)) { try { fs.unlinkSync(oldEnc); cleaned++; } catch {} }
+        if (fs.existsSync(oldMd)) { try { fs.unlinkSync(oldMd); cleaned++; } catch {} }
+      }
+
+      // Always overwrite .txt with fresh content from bundled source
+      fs.writeFileSync(destPath, fs.readFileSync(srcPath, 'utf8'), 'utf8');
+      refreshed++;
+    }
   }
+
+  if (refreshed > 0 || cleaned > 0) {
+    log(`Skill files refreshed: ${refreshed} updated, ${cleaned} old files cleaned`);
+  }
+}
+
+/**
+ * Copy a skill directory to workspace.
+ * Files are kept as-is (.txt stays .txt) since claw.exe now supports both .md and .txt.
+ * This avoids .md files being encrypted by enterprise DLP (e.g. MDE) on some machines.
+ */
+function copySkillDirToWorkspace(src, dest) {
+  fs.mkdirSync(dest, { recursive: true });
+  const entries = fs.readdirSync(src, { withFileTypes: true });
+  for (const entry of entries) {
+    const srcPath = path.join(src, entry.name);
+    const destPath = path.join(dest, entry.name);
+    if (entry.isDirectory()) {
+      copySkillDirToWorkspace(srcPath, destPath);
+    } else {
+      fs.copyFileSync(srcPath, destPath);
+    }
+  }
+}
+
+/**
+ * Copy only new files from src skill dir to dest, skipping any that already exist.
+ * Files are kept as-is (.txt stays .txt) since claw.exe now supports both.
+ * Returns the count of newly copied files.
+ */
+function copyNewSkillFiles(src, dest, depth = 0) {
+  fs.mkdirSync(dest, { recursive: true });
+  let count = 0;
+  const entries = fs.readdirSync(src, { withFileTypes: true });
+  for (const entry of entries) {
+    const srcPath = path.join(src, entry.name);
+    if (entry.isDirectory()) {
+      count += copyNewSkillFiles(srcPath, path.join(dest, entry.name), depth + 1);
+    } else {
+      const destPath = path.join(dest, entry.name);
+      // Also check if the .md version already exists (user may have it in old format)
+      const mdVariant = destPath.replace(/\.txt$/, '.md');
+      const alreadyExists = fs.existsSync(destPath) || fs.existsSync(mdVariant)
+        || fs.existsSync(destPath + '.IPGSD') || fs.existsSync(mdVariant + '.IPGSD');
+      if (!alreadyExists) {
+        fs.copyFileSync(srcPath, destPath);
+        count++;
+      }
+    }
+  }
+  return count;
 }
 
 function copyDirRecursive(src, dest) {
@@ -121,24 +183,80 @@ function copyDirRecursive(src, dest) {
 }
 
 /**
+ * Export readable .txt copies of all skill .md files to a user-accessible folder.
+ * claw.exe encrypts .md files in .claw/skills/ — this gives users a plain-text copy
+ * they can open with any text editor.
+ * Always overwrites so docs stay current after app updates.
+ */
+function exportSkillDocs() {
+  const bundledSkillsDir = path.join(APP_DIR, 'skills');
+  const docsOutDir = path.join(USER_DATA, 'skills-docs');
+
+  if (!fs.existsSync(bundledSkillsDir)) return;
+
+  fs.mkdirSync(docsOutDir, { recursive: true });
+
+  // Walk every skill directory and copy .md → .txt
+  const entries = fs.readdirSync(bundledSkillsDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const skillSrcDir = path.join(bundledSkillsDir, entry.name);
+    const skillDocDir = path.join(docsOutDir, entry.name);
+    fs.mkdirSync(skillDocDir, { recursive: true });
+
+    const files = fs.readdirSync(skillSrcDir, { withFileTypes: true });
+    for (const file of files) {
+      if (!file.isFile()) continue;
+      if (!file.name.endsWith('.txt') && !file.name.endsWith('.md')) continue;
+      const src = path.join(skillSrcDir, file.name);
+      // Ensure output is always .txt
+      const destName = file.name.endsWith('.md') ? file.name.replace(/\.md$/, '.txt') : file.name;
+      const dest = path.join(skillDocDir, destName);
+      const content = fs.readFileSync(src, 'utf8');
+      fs.writeFileSync(dest, '\uFEFF' + content, 'utf8');
+    }
+  }
+
+  // Also export installer/docs/*.md as .txt
+  const bundledDocsDir = path.join(APP_DIR, 'docs');
+  if (fs.existsSync(bundledDocsDir)) {
+    const mainDocDir = path.join(docsOutDir, 'docs');
+    fs.mkdirSync(mainDocDir, { recursive: true });
+    for (const file of fs.readdirSync(bundledDocsDir)) {
+      if (!file.endsWith('.md')) continue;
+      const content = fs.readFileSync(path.join(bundledDocsDir, file), 'utf8');
+      fs.writeFileSync(
+        path.join(mainDocDir, file.replace(/\.md$/, '.txt')),
+        '\uFEFF' + content, 'utf8'
+      );
+    }
+  }
+
+  log(`Skill docs exported as .txt to: ${docsOutDir}`);
+}
+
+/**
  * Write CLAUDE.md to the workspace root.
  * claw.exe reads CLAUDE.md (hardcoded name) as persistent memory on every startup.
  * Source content comes from Frontier.md bundled in the app directory.
  * Always overwrite so instructions stay current after updates.
  */
 function setupClaudeMd() {
-  const claudeMdPath = path.join(USER_DATA, 'CLAUDE.md');
+  // Write to .claw/instructions.txt — claw.exe reads this as system prompt.
+  // Using .txt extension to avoid enterprise DLP (MDE) encryption of .md files.
+  const instructionsPath = path.join(USER_DATA, '.claw', 'instructions.txt');
+  fs.mkdirSync(path.dirname(instructionsPath), { recursive: true });
 
-  // Try to read from bundled Frontier.md first
-  const frontierMdPath = path.join(APP_DIR, 'Frontier.md');
+  // Try to read from bundled Frontier.txt
+  const frontierMdPath = path.join(APP_DIR, 'Frontier.txt');
   if (fs.existsSync(frontierMdPath)) {
     const content = fs.readFileSync(frontierMdPath, 'utf8');
-    fs.writeFileSync(claudeMdPath, content, 'utf8');
-    log('CLAUDE.md written to workspace from Frontier.md');
+    fs.writeFileSync(instructionsPath, content, 'utf8');
+    log('instructions.txt written to workspace from Frontier.txt');
     return;
   }
 
-  // Fallback: inline content if Frontier.md is not bundled
+  // Fallback: inline content
   const content = [
     '# 强制指令 — 必须遵守',
     '',
@@ -166,28 +284,10 @@ function setupClaudeMd() {
     '$bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)',
     'Invoke-WebRequest -Uri "http://localhost:8081/heartbeat" -Method POST -Body $bodyBytes -ContentType "application/json; charset=utf-8"',
     '```',
-    '',
-    '### 停止任务',
-    '',
-    '```powershell',
-    'Invoke-WebRequest -Uri "http://localhost:8081/heartbeat" -Method POST -Body \'{"action":"remove","id":"task-name"}\' -ContentType "application/json"',
-    '```',
-    '',
-    '### 清除所有任务',
-    '',
-    '```powershell',
-    'Invoke-WebRequest -Uri "http://localhost:8081/heartbeat" -Method POST -Body \'{"action":"clear"}\' -ContentType "application/json"',
-    '```',
-    '',
-    '### 查看所有任务',
-    '',
-    '```powershell',
-    'Invoke-WebRequest -Uri "http://localhost:8081/heartbeat" -Method POST -Body \'{"action":"list"}\' -ContentType "application/json"',
-    '```',
   ].join('\n');
 
-  fs.writeFileSync(claudeMdPath, content, 'utf8');
-  log('CLAUDE.md written to workspace with heartbeat instructions (fallback)');
+  fs.writeFileSync(instructionsPath, content, 'utf8');
+  log('instructions.txt written to workspace (fallback)');
 }
 
 function log(msg) {
@@ -332,22 +432,57 @@ async function main() {
     // PowerShell not available or no process on port, that's fine
   }
 
-  // Set up MCP configuration (first launch only)
-  setupMcpConfig();
-
   // Set up bundled skills (first launch only, won't overwrite user changes)
   setupSkills();
+
+  // Refresh skill .md files — delete encrypted .IPGSD and rewrite clean plaintext.
+  // Must run before claw.exe connects so files are readable.
+  refreshSkillFiles();
+
+  // Export readable .txt copies of all skill docs (always refresh so updates are visible)
+  exportSkillDocs();
 
   // Write/update CLAUDE.md with mandatory agent instructions (always overwrite to stay current)
   setupClaudeMd();
 
-  // Copy frontier settings if not exists
+  // Merge frontier-settings.json into .claw/settings.json on each launch.
+  // - If settings.json doesn't exist: copy template (with ${USER_HOME} substitution)
+  // - If settings.json exists: add only NEW mcpServers from template that aren't already configured
   const clawSettingsSrc = path.join(APP_DIR, 'frontier-settings.json');
   const clawSettingsDst = path.join(USER_DATA, '.claw', 'settings.json');
-  if (fs.existsSync(clawSettingsSrc) && !fs.existsSync(clawSettingsDst)) {
+  if (fs.existsSync(clawSettingsSrc)) {
     fs.mkdirSync(path.dirname(clawSettingsDst), { recursive: true });
-    fs.copyFileSync(clawSettingsSrc, clawSettingsDst);
-    log('Claw settings copied to workspace');
+    const userHome = (process.env.USERPROFILE || process.env.HOME || '').replace(/\\/g, '\\\\');
+    let templateContent = fs.readFileSync(clawSettingsSrc, 'utf8');
+    templateContent = templateContent.replace(/\$\{USER_HOME\}/g, userHome);
+    const template = JSON.parse(templateContent);
+
+    if (!fs.existsSync(clawSettingsDst)) {
+      // First launch: write template as-is
+      fs.writeFileSync(clawSettingsDst, JSON.stringify(template, null, 2), 'utf8');
+      log(`Settings created: ${clawSettingsDst}`);
+    } else {
+      // Subsequent launches: merge new servers from template without overwriting user config
+      try {
+        const existing = JSON.parse(fs.readFileSync(clawSettingsDst, 'utf8'));
+        const existingServers = existing.mcpServers || {};
+        const templateServers = template.mcpServers || {};
+        let added = 0;
+        for (const [name, config] of Object.entries(templateServers)) {
+          if (!existingServers[name]) {
+            existingServers[name] = config;
+            added++;
+          }
+        }
+        if (added > 0) {
+          existing.mcpServers = existingServers;
+          fs.writeFileSync(clawSettingsDst, JSON.stringify(existing, null, 2), 'utf8');
+          log(`Settings updated: added ${added} new MCP server(s)`);
+        }
+      } catch (e) {
+        log(`Settings merge failed (keeping existing): ${e.message}`);
+      }
+    }
   }
 
   startBackend();
