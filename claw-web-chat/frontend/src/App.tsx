@@ -5,8 +5,28 @@ import { checkAndSendStartupMessage } from './services/agui-client';
 import { Header } from './components/Header';
 import { SessionSidebar } from './components/SessionSidebar';
 import { ChatArea } from './components/ChatArea';
-import { ConfigPanel } from './components/ConfigPanel';
 import { Notifications } from './components/Notifications';
+import { LoginPage } from './components/LoginPage';
+
+/** Returns true if the saved gateway token is still valid */
+function isTokenValid(): boolean {
+  const expiresAt = localStorage.getItem('frontier_token_expires_at');
+  if (!expiresAt) return false;
+  // Also verify the saved profile uses the current gateway URL
+  const profile = useChatStore.getState().config.profiles.find((p) => p.id === 'gateway');
+  if (profile && profile.baseUrl !== 'https://frontier.hexai.top') {
+    // Stale profile with old URL — clear it
+    localStorage.removeItem('frontier_token_expires_at');
+    return false;
+  }
+  return Date.now() < parseInt(expiresAt, 10) - 60_000; // 1-min buffer
+}
+
+/** Returns the saved gateway access token if it's still valid, otherwise null */
+function getSavedToken(): string | null {
+  const profile = useChatStore.getState().config.profiles.find((p) => p.id === 'gateway');
+  return profile?.apiKey && isTokenValid() ? profile.apiKey : null;
+}
 
 function App() {
   const theme = useChatStore((s) => s.config.theme);
@@ -17,7 +37,23 @@ function App() {
   const createSession = useChatStore((s) => s.createSession);
   const config = useChatStore((s) => s.config);
 
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  // Login gate: show LoginPage until we have a valid token
+  const [isLoggedIn, setIsLoggedIn] = useState(() => getSavedToken() !== null);
+
+  const handleLogout = useCallback(() => {
+    // Clear gateway token and profile — no need to explicitly reset backend,
+    // the next login's sendConfig will handle reconnecting with the new token
+    localStorage.removeItem('frontier_token_expires_at');
+    localStorage.removeItem('frontier_username');
+    const state = useChatStore.getState();
+    const remaining = state.config.profiles.filter((p) => p.id !== 'gateway');
+    state.updateConfig({
+      profiles: remaining.length > 0 ? remaining : state.config.profiles,
+      activeProfile: remaining.length > 0 ? remaining[0].id : state.config.activeProfile,
+    });
+    state.setConnectionStatus('disconnected');
+    setIsLoggedIn(false);
+  }, []);
 
   // Apply theme class to document on mount and when theme changes
   useEffect(() => {
@@ -59,12 +95,14 @@ function App() {
       }
     });
 
-    // Fallback: try auto-connect after delay
+    // Fallback: try auto-connect after delay — only if user is logged in
     const timer = setTimeout(async () => {
+      // Don't auto-connect if showing login page
+      if (!isLoggedIn) return;
       const state = useChatStore.getState();
       if (state.connectionStatus === 'connected') return; // already connected
 
-      // First check if backend is already connected (e.g., another browser/tab configured it)
+      // First check if backend is already connected or connecting
       try {
         const healthRes = await fetch('/health', { signal: AbortSignal.timeout(3000) });
         if (healthRes.ok) {
@@ -74,17 +112,27 @@ function App() {
             useChatStore.getState().setConnectionStatus('connected');
             return;
           }
+          // If login page is in the middle of connecting, don't interfere
+          if (health.connectingInProgress) return;
         }
       } catch {}
 
-      // Not connected yet — try to connect with saved credentials
-      const profile = state.config.profiles.find((p) => p.id === state.config.activeProfile);
+      // Not connected yet — prefer gateway profile with valid token, fall back to active profile
+      const token = getSavedToken();
+      const gatewayProfile = state.config.profiles.find((p) => p.id === 'gateway');
+      // Only use gateway profile if it matches the current gateway URL
+      const validGateway = token && gatewayProfile && gatewayProfile.baseUrl === 'https://frontier.hexai.top';
+      const profile = validGateway
+        ? gatewayProfile
+        : state.config.profiles.find((p) => p.id === state.config.activeProfile);
       if (profile?.apiKey) {
+        // Force correct model format for gateway profile
+        const model = profile.id === 'gateway' ? 'anthropic/claude-sonnet-4-20250514' : profile.model;
         sendConnectConfig({
           baseUrl: profile.baseUrl || '',
           clawHost: '127.0.0.1',
           clawPort: 9527,
-          model: profile.model,
+          model,
           apiKey: profile.apiKey,
         });
       }
@@ -95,7 +143,7 @@ function App() {
       unsubscribe();
       wsClient.disconnect();
     };
-  }, []);
+  }, [isLoggedIn]);
 
   // Health monitor: periodically check backend health and auto-reconnect if needed
   useEffect(() => {
@@ -156,6 +204,10 @@ function App() {
                 const id: string = typeof result === 'string' ? result : (result.id ?? String(Date.now()));
                 const text: string = typeof result === 'string' ? result : (result.text ?? JSON.stringify(result));
                 if (seenHeartbeatIds.has(id)) continue;
+
+                // Skip reports that indicate a stopped/cancelled heartbeat (not real data)
+                const stopWords = ['已停止', '已取消', '停止了', 'stopped', 'cancelled', 'canceled', '任务不存在', '没有心跳'];
+                if (stopWords.some(w => text.includes(w))) continue;
                 seenHeartbeatIds.add(id);
                 if (seenHeartbeatIds.size > 200) {
                   const first = seenHeartbeatIds.values().next().value as string;
@@ -190,12 +242,17 @@ function App() {
     updateConfig({ sidebarCollapsed: !sidebarCollapsed });
   }, [sidebarCollapsed, updateConfig]);
 
+  // Show login page if not authenticated
+  if (!isLoggedIn) {
+    return <LoginPage onLoginSuccess={() => setIsLoggedIn(true)} />;
+  }
+
   return (
     <div className={`h-screen flex flex-col bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100`}>
       <Header
         onToggleSidebar={toggleSidebar}
-        onOpenSettings={() => setSettingsOpen(true)}
         sidebarCollapsed={sidebarCollapsed}
+        onLogout={handleLogout}
       />
 
       <div className="flex flex-1 overflow-hidden">
@@ -211,9 +268,6 @@ function App() {
           <ChatArea />
         </main>
       </div>
-
-      {/* Config panel modal */}
-      {settingsOpen && <ConfigPanel onClose={() => setSettingsOpen(false)} />}
 
       {/* Toast notifications */}
       <Notifications />

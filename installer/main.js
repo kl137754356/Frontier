@@ -236,6 +236,75 @@ function exportSkillDocs() {
 }
 
 /**
+ * Auto-detect MCP server executables in the mcp-servers/ directory and
+ * register them in .claw/settings.json. Supports:
+ *   metrology-mcp.exe  → "metrology" server
+ *   pcdmis-mcp.exe     → "pcdmis" server
+ * Always updates to pick up path changes after reinstall.
+ */
+function setupLocalMcpServers() {
+  const mcpDir = path.join(APP_DIR, 'mcp-servers');
+  const settingsPath = path.join(USER_DATA, '.claw', 'settings.json');
+
+  if (!fs.existsSync(mcpDir) || !fs.existsSync(settingsPath)) return;
+
+  const mcpMappings = [
+    {
+      exeName: 'metrology-mcp.exe',
+      serverKey: 'metrology',
+      buildConfig: (exePath) => ({
+        command: exePath,
+        args: [],
+        env: { METROLOGY_AI_URL: process.env.METROLOGY_AI_URL || 'http://localhost:8780' },
+      }),
+    },
+    {
+      exeName: 'pcdmis-mcp.exe',
+      serverKey: 'pcdmis',
+      buildConfig: (exePath) => ({
+        command: exePath,
+        args: [],
+      }),
+    },
+  ];
+
+  let changed = false;
+  let settings;
+  try {
+    settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+  } catch {
+    return;
+  }
+  if (!settings.mcpServers) settings.mcpServers = {};
+
+  const files = fs.readdirSync(mcpDir);
+  for (const mapping of mcpMappings) {
+    const found = files.find(f => f.toLowerCase() === mapping.exeName.toLowerCase());
+    if (found) {
+      // Use absolute path (APP_DIR is the install location, not relative to cwd)
+      const exePath = path.join(mcpDir, found);
+      const newConfig = mapping.buildConfig(exePath);
+      const existingCmd = settings.mcpServers[mapping.serverKey]?.command || '';
+      if (!settings.mcpServers[mapping.serverKey] || existingCmd !== exePath) {
+        settings.mcpServers[mapping.serverKey] = newConfig;
+        log(`MCP server configured: ${mapping.serverKey} → ${found}`);
+        changed = true;
+      }
+    } else {
+      if (settings.mcpServers[mapping.serverKey]) {
+        delete settings.mcpServers[mapping.serverKey];
+        log(`MCP server removed (exe not found): ${mapping.serverKey}`);
+        changed = true;
+      }
+    }
+  }
+
+  if (changed) {
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
+  }
+}
+
+/**
  * Write CLAUDE.md to the workspace root.
  * claw.exe reads CLAUDE.md (hardcoded name) as persistent memory on every startup.
  * Source content comes from Frontier.md bundled in the app directory.
@@ -484,6 +553,9 @@ async function main() {
       }
     }
   }
+
+  // Auto-configure MCP servers found in mcp-servers/ directory
+  setupLocalMcpServers();
 
   startBackend();
 

@@ -2242,7 +2242,16 @@ fn run_tcp_serve(port: u16, model: &str, permission_mode: PermissionMode) -> Res
     eprintln!("[claw-serve] model: {model}");
     eprintln!("[claw-serve] permission_mode: {permission_mode:?}");
 
-    let listener = TcpListener::bind(format!("127.0.0.1:{port}"))?;
+    // Use socket2 for SO_REUSEADDR so the port can be reused immediately after restart
+    // This prevents EADDRINUSE when restarting quickly (port in TIME_WAIT state)
+    use socket2::{Domain, Protocol, Socket, Type};
+    use std::str::FromStr;
+    let addr: std::net::SocketAddr = std::net::SocketAddr::from_str(&format!("127.0.0.1:{port}")).unwrap();
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_reuse_address(true)?;
+    socket.bind(&addr.into())?;
+    socket.listen(128)?;
+    let listener: TcpListener = socket.into();
     eprintln!("[claw-serve] listening on 127.0.0.1:{port}");
     eprintln!("[claw-serve] waiting for connections...");
 

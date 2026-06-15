@@ -1,19 +1,19 @@
 Frontier MCP Servers
 ====================
 
-此目录存放 MCP (Model Context Protocol) 服务器的可执行文件。
-Frontier 启动时会根据 .claw/settings/mcp.json 配置自动连接这些 MCP 服务器。
+此目录用于放置 MCP Server 可执行文件。
+Frontier 启动时会自动检测并配置，无需手动修改任何配置文件。
 
-如何替换 MCP 服务器：
-1. 将新的 .exe 文件复制到此目录
-2. 确保文件名与 mcp.json 中配置的一致
-3. 重启 Frontier 即可生效
+已内置的 MCP Server：
 
-当前已配置的 MCP 服务器：
-- metrology-mcp.exe  — Hexagon Metrology AI 计量软件控制
-- pcdmis-mcp.exe     — PC-DMIS 三坐标测量自动化
+1. Metrology AI MCP
+   文件名: metrology-mcp.exe
+   说明: Hexagon Metrology AI 集成
 
-注意事项：
-- MCP 服务器必须支持 stdio 传输方式
-- 替换后请确认 exe 的命令行参数兼容
-- 如需修改参数，请编辑 .claw/settings/mcp.json
+2. PC-DMIS Automation MCP
+   文件名: pcdmis-mcp.exe
+   说明: PC-DMIS 自动化控制
+
+更新版本方法：
+- 直接替换同名 exe 文件，重启 Frontier 即可生效
+- 文件名必须保持一致（metrology-mcp.exe / pcdmis-mcp.exe）

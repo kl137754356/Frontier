@@ -845,42 +845,62 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
 async function handleConfig(req: IncomingMessage, res: ServerResponse): Promise<void> {
   setCorsHeaders(res);
   const body = await parseBody(req);
-  const { apiKey, baseUrl, model } = body;
-  const port = CLAW_PORT; // Always use server-side configured port
-
-  // If already connected with the SAME model, return success without restart.
-  // If model differs, fall through to restart claw-code with the new model.
-  const currentConfig = clawProcess.getConfig();
-  if (tcpBridge.isConnected() && clawProcess.isRunning()) {
-    const sameModel = currentConfig?.model === model;
-    const sameBaseUrl = (currentConfig?.baseUrl || '') === (baseUrl || '');
-    if (sameModel && sameBaseUrl) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'connected', model: currentConfig?.model }));
-      return;
-    }
-    // Model or baseUrl changed — need to restart claw-code
+  const { apiKey, baseUrl, model: rawModel } = body;
+  // Normalize model name — ensure provider prefix (e.g. claude-xxx → anthropic/claude-xxx)
+  let model = rawModel || '';
+  if (model && !model.includes('/') && model.startsWith('claude-')) {
+    model = `anthropic/${model}`;
   }
+  const port = CLAW_PORT;
 
-  // Prevent concurrent connect attempts
+  const reqId = Date.now().toString(36);
+  const maskedKey = apiKey ? apiKey.slice(0, 8) + '...' : '(none)';
+  console.log(`[Config#${reqId}] ENTER — model=${model} baseUrl=${baseUrl || '(default)'} apiKey=${maskedKey}`);
+
+  // Prevent concurrent connect attempts — set early to block auto-reconnect race
   if (connectingInProgress) {
+    console.log(`[Config#${reqId}] REJECT — another connection in progress`);
     res.writeHead(409, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Connection in progress' }));
     return;
   }
-
   connectingInProgress = true;
   if (connectingTimer) clearTimeout(connectingTimer);
-  connectingTimer = setTimeout(() => { connectingInProgress = false; }, 20000);
+  connectingTimer = setTimeout(() => { connectingInProgress = false; }, 60000); // 60s to allow MCP init
+
+  // If claw-code is running with the same token, reuse it.
+  // If the token changed (different account), we must restart claw with the new token.
+  const currentConfig = clawProcess.getConfig();
+  console.log(`[Config#${reqId}] current state — connected=${tcpBridge.isConnected()} running=${clawProcess.isRunning()} currentKey=${currentConfig?.apiKey ? currentConfig.apiKey.slice(0, 8) + '...' : '(none)'}`);
+  if (tcpBridge.isConnected() && clawProcess.isRunning()) {
+    const sameApiKey = (currentConfig?.apiKey || '') === (apiKey || '');
+    if (sameApiKey) {
+      console.log(`[Config#${reqId}] SKIP — same token, reusing connection`);
+      connectingInProgress = false;
+      if (connectingTimer) { clearTimeout(connectingTimer); connectingTimer = null; }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'connected', model: currentConfig?.model }));
+      return;
+    }
+    console.log(`[Config#${reqId}] RESTART — token changed (new account)`);
+  }
 
   try {
-    // Stop existing process
+    // Stop existing process — must restart to pass new token as env var
     if (clawProcess.isRunning()) {
+      console.log(`[Config#${reqId}] stopping old claw process`);
       tcpBridge.disconnect();
       await clawProcess.stop();
-      await new Promise((r) => setTimeout(r, 2000));
+      // Give MCP subprocesses time to clean up and OS to release port
+      // Retry until port is free (up to 8 seconds)
+      for (let i = 0; i < 16; i++) {
+        await new Promise((r) => setTimeout(r, 500));
+        if (!clawProcess.isRunning()) break;
+      }
+      await new Promise((r) => setTimeout(r, 500));
     }
 
+    console.log(`[Config#${reqId}] starting claw with new credentials`);
     // Start claw-code
     await clawProcess.start({
       apiKey: apiKey || '',
@@ -889,21 +909,91 @@ async function handleConfig(req: IncomingMessage, res: ServerResponse): Promise<
       port: CLAW_PORT,
     });
 
-    // Wait for TCP listener
-    await new Promise((r) => setTimeout(r, 1000));
+    // Wait for TCP listener — give claw.exe more time to initialize (MCP servers can be slow)
+    await new Promise((r) => setTimeout(r, 3000));
 
-    // Connect TCP bridge
-    await tcpBridge.connect('127.0.0.1', CLAW_PORT);
+    console.log(`[Config#${reqId}] connecting TCP bridge`);
+    // Connect TCP bridge — retry up to 5 times to handle port cleanup delays
+    let connected = false;
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      try {
+        if (!tcpBridge.isConnected()) {
+          await tcpBridge.connect('127.0.0.1', CLAW_PORT);
+        }
+        connected = true;
+        break;
+      } catch (connErr) {
+        console.log(`[Config#${reqId}] TCP connect attempt ${attempt} failed, retrying in 1s...`);
+        await new Promise((r) => setTimeout(r, 1000));
+        // Restart claw if it exited
+        if (!clawProcess.isRunning()) {
+          await clawProcess.start({ apiKey: apiKey || '', baseUrl: baseUrl || undefined, model: model || undefined, port: CLAW_PORT });
+        }
+      }
+    }
+    if (!connected) throw new Error('connect ECONNREFUSED 127.0.0.1:9527 (all retries failed)');
 
+    // Wait for claw-code to send 'ready' (MCP initialization complete)
+    await new Promise<void>((resolve, reject) => {
+      const readyTimeout = setTimeout(() => {
+        tcpBridge.off('message', readyListener);
+        resolve(); // proceed anyway after 20s
+      }, 20000);
+      const readyListener = (msg: TcpServerMessage) => {
+        if (msg.type === 'ready') {
+          tcpBridge.off('message', readyListener);
+          clearTimeout(readyTimeout);
+          resolve();
+        } else if (msg.type === 'error') {
+          tcpBridge.off('message', readyListener);
+          clearTimeout(readyTimeout);
+          reject(new Error(msg.text));
+        }
+      };
+      tcpBridge.on('message', readyListener);
+    });
+
+    console.log(`[Config#${reqId}] SUCCESS — model: ${model}, baseUrl: ${baseUrl || '(default)'}`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'connected', model }));
+    console.log(`[AgUiServer] Connected — model: ${model}, baseUrl: ${baseUrl || '(default)'}`);
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : 'Connection failed';
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: errorMsg }));
+    console.log(`[Config#${reqId}] FAILED — ${errorMsg}, retrying once in 3s...`);
+
+    // Retry once after a short delay — handles transient port/process cleanup races
+    try {
+      await new Promise((r) => setTimeout(r, 3000));
+      if (!clawProcess.isRunning()) {
+        await clawProcess.start({
+          apiKey: apiKey || '',
+          baseUrl: baseUrl || undefined,
+          model: model || undefined,
+          port: CLAW_PORT,
+        });
+      }
+      if (!tcpBridge.isConnected()) {
+        await tcpBridge.connect('127.0.0.1', CLAW_PORT);
+      }
+      // Wait for ready
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, 15000);
+        const l = (msg: TcpServerMessage) => { if (msg.type === 'ready') { clearTimeout(t); tcpBridge.off('message', l); resolve(); } };
+        if (tcpBridge.isConnected()) tcpBridge.on('message', l); else resolve();
+      });
+      console.log(`[Config#${reqId}] RETRY SUCCESS`);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'connected', model }));
+    } catch (retryErr) {
+      const retryMsg = retryErr instanceof Error ? retryErr.message : 'Retry failed';
+      console.log(`[Config#${reqId}] RETRY FAILED — ${retryMsg}`);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: retryMsg }));
+    }
   } finally {
     connectingInProgress = false;
     if (connectingTimer) { clearTimeout(connectingTimer); connectingTimer = null; }
+    console.log(`[Config#${reqId}] EXIT`);
   }
 }
 
@@ -1070,6 +1160,7 @@ function handleHealth(res: ServerResponse): void {
     status: tcpBridge.isConnected() ? 'ok' : 'degraded',
     tcp: tcpBridge.isConnected(),
     clawRunning: clawProcess.isRunning(),
+    connectingInProgress,
     uptime: process.uptime(),
   }));
 }
@@ -1173,6 +1264,8 @@ tcpBridge.on('disconnected', () => {
   // Don't auto-reconnect here — the 'exit' handler on clawProcess will handle restart
   // Auto-reconnect only if claw is still running (e.g., TCP glitch without process crash)
   setTimeout(() => {
+    // Skip auto-reconnect if a manual handleConfig is in progress (it will connect itself)
+    if (connectingInProgress) return;
     if (!tcpBridge.isConnected() && clawProcess.isRunning()) {
       console.log('[AgUiServer] Attempting TCP auto-reconnect (claw still running)...');
       tcpBridge.connect('127.0.0.1', CLAW_PORT);
@@ -1221,6 +1314,11 @@ clawProcess.on('exit', (code: number | null) => {
   // Auto-restart claw-code if it exits unexpectedly
   // Wait a moment then try to restart with last known config
   setTimeout(async () => {
+    // Skip auto-restart if handleConfig is already managing a restart
+    if (connectingInProgress) {
+      console.log('[AgUiServer] Skipping auto-restart — handleConfig is in progress');
+      return;
+    }
     if (clawProcess.isRunning()) return; // Already restarted
     console.log('[AgUiServer] Attempting to auto-restart claw-code...');
     try {

@@ -93,6 +93,10 @@ if (fs.existsSync(frontierMd)) {
 // Copy MCP servers directory and config template are no longer needed.
 // claw.exe reads MCP config from CLAW_WORKSPACE/.claw/settings.json (copied from frontier-settings.json).
 
+// Copy mcp-servers/ folder (contains user-supplied MCP server executables + README)
+copyDir(path.join(ROOT, 'mcp-servers'), path.join(RELEASE_DIR, 'mcp-servers'));
+console.log('  mcp-servers/ folder copied (place metrology-mcp.exe / pcdmis-mcp.exe here)');
+
 
 // Copy bundled skills — rename .md to .txt to prevent claw.exe encryption
 copyDirRenameMd(path.join(ROOT, 'skills'), path.join(RELEASE_DIR, 'skills'));

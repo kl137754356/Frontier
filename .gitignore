@@ -53,3 +53,6 @@ desktop.ini
 *.tmp
 *.bak
 .claude.zip
+
+# MCP server executables (large binaries, not versioned in git)
+installer/mcp-servers/*.exe
