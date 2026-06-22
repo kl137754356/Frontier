@@ -15,12 +15,16 @@
  */
 
 import { createServer, IncomingMessage, ServerResponse } from 'http';
-import { readFileSync, existsSync, statSync } from 'fs';
-import { join, extname } from 'path';
+import { readFileSync, existsSync, statSync, writeFileSync, mkdirSync } from 'fs';
+import { join, extname, dirname } from 'path';
 import { TcpBridge } from './tcp-bridge.js';
 import { ClawProcess } from './claw-process.js';
 import { resolveSkill } from './ws-handler.js';
 import type { TcpServerMessage } from '../../shared/protocol.js';
+import type { PromptMeta } from '../../shared/protocol.js';
+
+// --- Session turn tracking for telemetry ---
+const sessionTurnCounters: Map<string, number> = new Map();
 
 // --- Production static file serving ---
 const FRONTEND_DIST = process.env.FRONTEND_DIST || '';
@@ -382,16 +386,137 @@ function extractA2UIOperations(text: string): any[] | null {
   return null;
 }
 
+// --- A2A Direct Agent Mode (bypass claw-code) ---
+async function handleDirectA2AAgent(
+  req: any, res: any, agentId: string, lastUserMsg: any, runId?: string
+): Promise<void> {
+  // Find the agent in config
+  const config = loadA2AAgentsConfig();
+  const agent = config.agents?.find((a: any) => a.id === agentId);
+  if (!agent || !agent.url) {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: `Agent '${agentId}' not found or has no URL` }));
+    return;
+  }
+
+  // Set up SSE response
+  setCorsHeaders(res);
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  res.flushHeaders();
+
+  const currentRunId = runId || `run-${Date.now()}`;
+  const messageId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  // Send RUN_STARTED
+  const sseEvent = (event: string, data: any) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  sseEvent('RUN_STARTED', { type: 'RUN_STARTED', threadId: agentId, runId: currentRunId });
+
+  // Extract user text
+  const userText = typeof lastUserMsg.content === 'string'
+    ? lastUserMsg.content
+    : lastUserMsg.content?.map((c: any) => c.text || '').join('') || '';
+
+  // Send A2A JSON-RPC request to remote agent
+  const jsonRpcBody = {
+    jsonrpc: '2.0',
+    method: 'message/send',
+    id: `direct-${Date.now()}`,
+    params: {
+      message: {
+        role: 'user',
+        parts: [{ kind: 'text', text: userText }],
+      },
+    },
+  };
+
+  try {
+    const a2aUrl = `${agent.url.replace(/\/$/, '')}/a2a/jsonrpc`;
+    const response = await fetch(a2aUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(jsonRpcBody),
+      signal: AbortSignal.timeout(60000),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      sseEvent('TEXT_MESSAGE_START', { type: 'TEXT_MESSAGE_START', messageId, role: 'assistant' });
+      sseEvent('TEXT_MESSAGE_CONTENT', { type: 'TEXT_MESSAGE_CONTENT', messageId, delta: `[A2A Error] HTTP ${response.status}: ${errText}` });
+      sseEvent('TEXT_MESSAGE_END', { type: 'TEXT_MESSAGE_END', messageId });
+      sseEvent('RUN_FINISHED', { type: 'RUN_FINISHED', threadId: agentId, runId: currentRunId });
+      res.end();
+      return;
+    }
+
+    const data = await response.json() as any;
+
+    // Extract result text from A2A response
+    let resultText = '';
+    if (data.result) {
+      const result = data.result;
+      // Try artifacts first
+      if (result.artifacts?.length > 0) {
+        resultText = result.artifacts
+          .flatMap((a: any) => a.parts || [])
+          .filter((p: any) => p.kind === 'text')
+          .map((p: any) => p.text)
+          .join('\n');
+      }
+      // Try status message
+      if (!resultText && result.status?.message?.parts) {
+        resultText = result.status.message.parts
+          .filter((p: any) => p.kind === 'text')
+          .map((p: any) => p.text)
+          .join('');
+      }
+      if (!resultText) {
+        resultText = JSON.stringify(result);
+      }
+    } else if (data.error) {
+      resultText = `[A2A Error] ${data.error.message || JSON.stringify(data.error)}`;
+    } else {
+      resultText = JSON.stringify(data);
+    }
+
+    // Stream the result as AG-UI text message events
+    sseEvent('TEXT_MESSAGE_START', { type: 'TEXT_MESSAGE_START', messageId, role: 'assistant' });
+    sseEvent('TEXT_MESSAGE_CONTENT', { type: 'TEXT_MESSAGE_CONTENT', messageId, delta: resultText });
+    sseEvent('TEXT_MESSAGE_END', { type: 'TEXT_MESSAGE_END', messageId });
+
+  } catch (err: any) {
+    sseEvent('TEXT_MESSAGE_START', { type: 'TEXT_MESSAGE_START', messageId, role: 'assistant' });
+    sseEvent('TEXT_MESSAGE_CONTENT', { type: 'TEXT_MESSAGE_CONTENT', messageId, delta: `[A2A Error] ${err.message || 'Request failed'}` });
+    sseEvent('TEXT_MESSAGE_END', { type: 'TEXT_MESSAGE_END', messageId });
+  }
+
+  sseEvent('RUN_FINISHED', { type: 'RUN_FINISHED', threadId: agentId, runId: currentRunId });
+  res.end();
+}
+
 // --- POST /agent: AG-UI run endpoint ---
 async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await parseBody(req);
-  const { threadId, runId, messages } = body;
+  const { threadId, runId, messages, directAgentId } = body;
 
   // Extract the last user message as the prompt
   const lastUserMsg = [...(messages || [])].reverse().find((m: any) => m.role === 'user');
   if (!lastUserMsg) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'No user message provided' }));
+    return;
+  }
+
+  // --- A2A Direct Mode: bypass claw-code, talk directly to remote Agent ---
+  if (directAgentId) {
+    await handleDirectA2AAgent(req, res, directAgentId, lastUserMsg, runId);
     return;
   }
 
@@ -835,9 +960,19 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
   tcpBridge.on('message', onMessage);
 
   // Send the prompt to claw-code
+  // Build telemetry metadata for this turn
+  const turnIndex = sessionTurnCounters.get(threadId) ?? 0;
+  sessionTurnCounters.set(threadId, turnIndex + 1);
+  const promptMeta: PromptMeta = {
+    session_id: threadId || `session-${Date.now()}`,
+    turn_id: currentRunId,
+    turn_index: turnIndex,
+    terminal: 'web',
+  };
+
   console.log('[AgUiServer] Sending prompt to claw-code:', finalPrompt.slice(0, 100));
   tPromptSent = Date.now();
-  tcpBridge.sendPrompt(finalPrompt);
+  tcpBridge.sendPrompt(finalPrompt, promptMeta);
 }
 
 
@@ -1038,7 +1173,26 @@ async function handleCancel(req: IncomingMessage, res: ServerResponse): Promise<
       await clawProcess.stop();
       tcpBridge.disconnect();
       await clawProcess.start(config);
+      // Wait for TCP listener to be ready
+      await new Promise((r) => setTimeout(r, 2000));
       await tcpBridge.connect('127.0.0.1', config.port);
+      // Wait for claw-code to send 'ready' (MCP initialization complete)
+      await new Promise<void>((resolve) => {
+        const readyTimeout = setTimeout(() => {
+          console.log('[AgUiServer] Cancel restart: timed out waiting for ready, proceeding anyway');
+          tcpBridge.off('message', readyListener);
+          resolve();
+        }, 15000);
+        const readyListener = (msg: TcpServerMessage) => {
+          if (msg.type === 'ready') {
+            tcpBridge.off('message', readyListener);
+            clearTimeout(readyTimeout);
+            console.log('[AgUiServer] Cancel restart: claw-code ready');
+            resolve();
+          }
+        };
+        tcpBridge.on('message', readyListener);
+      });
       console.log('[AgUiServer] claw-code restarted successfully');
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'restarted' }));
@@ -1165,6 +1319,309 @@ function handleHealth(res: ServerResponse): void {
   }));
 }
 
+// --- Auth Proxy (avoids browser CORS/redirect issues with Gateway) ---
+async function handleAuthProxy(req: any, res: any) {
+  setCorsHeaders(res);
+  let body = '';
+  for await (const chunk of req) {
+    body += chunk;
+  }
+
+  try {
+    // Use Node.js fetch which properly handles redirects server-side
+    const gatewayUrl = 'https://frontier.hexai.top/auth/cli-login';
+    
+    // First request — may get 301 redirect
+    let response = await fetch(gatewayUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      redirect: 'manual',
+    });
+
+    // If redirected, follow manually preserving POST method
+    if ([301, 302, 307, 308].includes(response.status)) {
+      const location = response.headers.get('location');
+      if (location) {
+        const redirectUrl = location.startsWith('http') ? location : `https://frontier.hexai.top${location}`;
+        response = await fetch(redirectUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+          redirect: 'follow',
+        });
+      }
+    }
+
+    const text = await response.text();
+    res.writeHead(response.status, { 'Content-Type': 'application/json' });
+    res.end(text);
+  } catch (err: any) {
+    res.writeHead(502, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: err.message || 'Gateway proxy error' }));
+  }
+}
+
+// --- A2A External Agent Proxy ---
+// Credential store path (local dev: JSON file)
+const EXTERNAL_CREDENTIALS_PATH = join(
+  process.env.CLAW_WORKSPACE || process.cwd(),
+  '.claw',
+  'external-agent-credentials.json'
+);
+
+interface ExternalAgentCredential {
+  id: string;
+  base_url: string;
+  api_key: string;
+}
+
+function loadExternalCredentials(): ExternalAgentCredential[] {
+  try {
+    if (!existsSync(EXTERNAL_CREDENTIALS_PATH)) return [];
+    const raw = readFileSync(EXTERNAL_CREDENTIALS_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed.agents) ? parsed.agents : [];
+  } catch {
+    return [];
+  }
+}
+
+async function handleExternalAgentProxy(req: any, res: any) {
+  setCorsHeaders(res);
+
+  // Parse agent ID from URL: /api/v1/proxy/agent/{agentId}/chat
+  const urlParts = req.url?.split('/') || [];
+  const agentIdx = urlParts.indexOf('agent');
+  if (agentIdx === -1 || agentIdx + 2 >= urlParts.length) {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not found' }));
+    return;
+  }
+  const agentId = urlParts[agentIdx + 1];
+  const action = urlParts[agentIdx + 2]; // should be "chat"
+
+  if (action !== 'chat') {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not found' }));
+    return;
+  }
+
+  // Load credentials and find the target agent
+  const credentials = loadExternalCredentials();
+  const credential = credentials.find(c => c.id === agentId);
+  if (!credential) {
+    // IDOR protection: return 404 whether agent doesn't exist or user doesn't own it
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not found' }));
+    return;
+  }
+
+  // Read request body
+  let body = '';
+  for await (const chunk of req) {
+    body += chunk;
+  }
+
+  let parsed: { message?: string; history?: Array<{ role: string; content: string }>; stream?: boolean };
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Invalid JSON' }));
+    return;
+  }
+
+  const message = parsed.message || '';
+  const history = parsed.history || [];
+
+  // Transform to OpenAI format
+  const messages = [
+    ...history,
+    { role: 'user', content: message }
+  ];
+
+  try {
+    // Forward to external platform with API key
+    const response = await fetch(credential.base_url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${credential.api_key}`,
+      },
+      body: JSON.stringify({
+        model: 'agent',
+        messages,
+        stream: false,
+      }),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      res.writeHead(response.status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ reply: errText, status: 'error' }));
+      return;
+    }
+
+    const data = await response.json() as any;
+    const reply = data?.choices?.[0]?.message?.content || data?.reply || JSON.stringify(data);
+
+    // Never return api_key in response
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ reply, status: 'success' }));
+  } catch (err: any) {
+    res.writeHead(502, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ reply: err.message || 'Proxy error', status: 'error' }));
+  }
+}
+
+// --- A2A Agent Registry (CRUD + auto-restart claw) ---
+const A2A_CONFIG_PATH = join(
+  process.env.CLAW_WORKSPACE || join(process.cwd(), '..', '..'),
+  '.claw',
+  'a2a-agents.json'
+);
+
+function loadA2AAgentsConfig(): any {
+  try {
+    if (!existsSync(A2A_CONFIG_PATH)) return { agents: [], options: { connectTimeoutMs: 5000, failFast: false } };
+    return JSON.parse(readFileSync(A2A_CONFIG_PATH, 'utf8'));
+  } catch {
+    return { agents: [], options: { connectTimeoutMs: 5000, failFast: false } };
+  }
+}
+
+function saveA2AAgentsConfig(config: any): void {
+  mkdirSync(dirname(A2A_CONFIG_PATH), { recursive: true });
+  writeFileSync(A2A_CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
+}
+
+async function restartClawAfterAgentChange(): Promise<boolean> {
+  const config = clawProcess.getConfig();
+  if (!config) return false;
+  try {
+    tcpBridge.disconnect();
+    await clawProcess.stop();
+    await new Promise((r) => setTimeout(r, 2000));
+    await clawProcess.start(config);
+    await new Promise((r) => setTimeout(r, 2000));
+    await tcpBridge.connect('127.0.0.1', 9527);
+    // Wait for ready signal
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(() => { resolve(); }, 10000);
+      const listener = (msg: any) => {
+        if (msg?.type === 'ready') { clearTimeout(timeout); tcpBridge.off('message', listener); resolve(); }
+      };
+      tcpBridge.on('message', listener);
+    });
+    return true;
+  } catch (err: any) {
+    console.error('[A2A Registry] Failed to restart claw:', err.message);
+    return false;
+  }
+}
+
+async function handleA2AAgents(req: any, res: any) {
+  setCorsHeaders(res);
+  const url = req.url || '';
+
+  // GET /a2a-agents — list all
+  if (req.method === 'GET') {
+    const config = loadA2AAgentsConfig();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(config));
+    return;
+  }
+
+  // POST /a2a-agents — add a new agent
+  if (req.method === 'POST') {
+    let body = '';
+    for await (const chunk of req) { body += chunk; }
+    let input: any;
+    try { input = JSON.parse(body); } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid JSON' }));
+      return;
+    }
+
+    if (!input.id || !input.url) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing required fields: id, url' }));
+      return;
+    }
+
+    const config = loadA2AAgentsConfig();
+    if (config.agents.some((a: any) => a.id === input.id)) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Agent with id '${input.id}' already exists` }));
+      return;
+    }
+
+    // Validate: try to fetch Agent Card
+    let agentCard = null;
+    try {
+      const cardUrl = `${input.url.replace(/\/$/, '')}/.well-known/agent-card.json`;
+      const cardRes = await fetch(cardUrl, { signal: AbortSignal.timeout(5000) });
+      if (cardRes.ok) {
+        agentCard = await cardRes.json();
+      }
+    } catch {}
+
+    const newAgent = {
+      id: input.id,
+      type: input.type || 'native',
+      url: input.url,
+      enabled: input.enabled !== false,
+    };
+    config.agents.push(newAgent);
+    saveA2AAgentsConfig(config);
+
+    // Auto-restart claw to pick up new agent
+    console.log(`[A2A Registry] Added agent '${input.id}', restarting claw...`);
+    const restarted = await restartClawAfterAgentChange();
+
+    res.writeHead(201, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      agent: newAgent,
+      agentCard,
+      clawRestarted: restarted,
+    }));
+    return;
+  }
+
+  // DELETE /a2a-agents?id=xxx — remove an agent
+  if (req.method === 'DELETE') {
+    const params = new URL(url, 'http://localhost').searchParams;
+    const id = params.get('id');
+    if (!id) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing query param: id' }));
+      return;
+    }
+
+    const config = loadA2AAgentsConfig();
+    const idx = config.agents.findIndex((a: any) => a.id === id);
+    if (idx === -1) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Agent '${id}' not found` }));
+      return;
+    }
+
+    config.agents.splice(idx, 1);
+    saveA2AAgentsConfig(config);
+
+    console.log(`[A2A Registry] Removed agent '${id}', restarting claw...`);
+    const restarted = await restartClawAfterAgentChange();
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'deleted', id, clawRestarted: restarted }));
+    return;
+  }
+
+  res.writeHead(405, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'Method not allowed' }));
+}
+
 // --- HTTP Server ---
 const server = createServer(async (req, res) => {
   // CORS preflight
@@ -1238,6 +1695,15 @@ const server = createServer(async (req, res) => {
       res.end(JSON.stringify({ status: 'restarting' }));
       // Exit process — launcher will detect exit and restart
       setTimeout(() => process.exit(42), 500); // Exit code 42 = restart signal
+    } else if (req.method === 'POST' && req.url?.startsWith('/api/v1/proxy/agent/')) {
+      // --- A2A External Agent Proxy Endpoint ---
+      await handleExternalAgentProxy(req, res);
+    } else if (req.method === 'POST' && req.url === '/auth/cli-login') {
+      // --- Auth proxy: forward login to Gateway (avoids CORS/redirect issues) ---
+      await handleAuthProxy(req, res);
+    } else if (req.url === '/a2a-agents' || req.url?.startsWith('/a2a-agents?')) {
+      // --- A2A Agent Registry CRUD ---
+      await handleA2AAgents(req, res);
     } else if (serveStatic(req, res)) {
       // Served static file (production mode)
     } else {
