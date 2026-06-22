@@ -2288,10 +2288,12 @@ impl TcpClientSession {
 
     /// 处理 prompt 消息，SSE 流式输出到 writer
     /// 使用逐步 API 调用 + 工具执行循环，每步实时发送 TCP 消息
+    /// extra_headers: 每轮遥测头 (X-Session-Id 等)，注入到发往 gateway 的 HTTP 请求
     fn handle_prompt(
         &mut self,
         text: &str,
         writer: &mut std::net::TcpStream,
+        extra_headers: Vec<(String, String)>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("[claw-serve] [{}] processing prompt: {}...", self.peer, &text.chars().take(80).collect::<String>());
 
@@ -2331,8 +2333,16 @@ impl TcpClientSession {
                 .feature_config()
                 .clone()
                 .with_hooks(runtime_config.hooks().merged(&plugin_hook_config));
+
+            // --- A2A Integration Hook 1 & 2: Load config and append handoff tools ---
+            let mut all_runtime_tools = mcp_tools;
+            append_a2a_tools(&mut all_runtime_tools);
+            eprintln!("[A2A-DEBUG] runtime_tools count after append: {}, names: {:?}", 
+                all_runtime_tools.len(),
+                all_runtime_tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>());
+
             let tool_registry = GlobalToolRegistry::with_plugin_tools(plugin_registry.aggregated_tools()?)?
-                .with_runtime_tools(mcp_tools)?;
+                .with_runtime_tools(all_runtime_tools)?;
             RuntimePluginState {
                 feature_config,
                 tool_registry,
@@ -2362,6 +2372,8 @@ impl TcpClientSession {
 
         // Set up real-time streaming sink so API events (thinking, text, tool_start) are sent immediately
         let streaming_sink: Arc<Mutex<dyn std::io::Write + Send>> = Arc::new(Mutex::new(writer.try_clone()?));
+        // Inject per-turn telemetry headers into every outgoing HTTP request
+        runtime.api_client_mut().client.set_extra_headers(extra_headers);
         runtime.api_client_mut().set_streaming_sink(Some(streaming_sink.clone()));
 
         let mut permission_prompter = CliPermissionPrompter::new(self.cli.permission_mode);
@@ -2688,8 +2700,32 @@ fn handle_tcp_client(
 
                 // 使用 LiveCli 处理 prompt（保持会话上下文）
                 // 用 catch_unwind 防止 panic 断开 TCP 连接
+
+                // Extract telemetry metadata from prompt message and build HTTP headers
+                let extra_headers: Vec<(String, String)> = if let Some(meta) = msg.get("meta") {
+                    let mut hdrs = Vec::new();
+                    if let Some(v) = meta.get("session_id").and_then(|v| v.as_str()) {
+                        hdrs.push(("X-Session-Id".to_string(), v.to_string()));
+                    }
+                    if let Some(v) = meta.get("turn_id").and_then(|v| v.as_str()) {
+                        hdrs.push(("X-Turn-Id".to_string(), v.to_string()));
+                    }
+                    if let Some(v) = meta.get("turn_index").and_then(|v| v.as_u64()) {
+                        hdrs.push(("X-Turn-Index".to_string(), v.to_string()));
+                    }
+                    if let Some(v) = meta.get("terminal").and_then(|v| v.as_str()) {
+                        hdrs.push(("X-Terminal".to_string(), v.to_string()));
+                    }
+                    if !hdrs.is_empty() {
+                        eprintln!("[claw-serve] [{peer}] telemetry headers: {:?}", hdrs);
+                    }
+                    hdrs
+                } else {
+                    Vec::new()
+                };
+
                 let prompt_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    session.handle_prompt(text, &mut writer)
+                    session.handle_prompt(text, &mut writer, extra_headers)
                 }));
                 match prompt_result {
                     Ok(Ok(())) => {}
@@ -8662,6 +8698,83 @@ fn plugins_command_payload_from_result(
     }
 }
 
+/// A2A Integration: Load config and append handoff tools to the runtime tools list.
+/// Zero side-effect: if config is missing, empty, or agents unreachable, tools list is unchanged.
+fn append_a2a_tools(runtime_tools: &mut Vec<RuntimeToolDefinition>) {
+    use runtime::a2a;
+    use runtime::external;
+
+    // --- Native A2A Agents ---
+    let config = a2a::load_a2a_config(None);
+
+    if a2a::is_a2a_enabled(&config) {
+        let config = config.unwrap();
+        // Create a dedicated runtime for the async Agent Card fetch.
+        // We cannot use Handle::try_current() because this runs in a sync context
+        // that may not have a tokio runtime active on the current thread.
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => {
+                eprintln!("[A2A] Failed to create async runtime: {}", e);
+                return;
+            }
+        };
+        let clients = match rt.block_on(a2a::create_a2a_clients(&config)) {
+            Ok(clients) => clients,
+            Err(e) => {
+                eprintln!("[A2A] Client creation failed: {}", e);
+                Vec::new()
+            }
+        };
+
+        if !clients.is_empty() {
+            let a2a_tools = a2a::build_handoff_tools(&clients);
+            for tool in &a2a_tools {
+                runtime_tools.push(RuntimeToolDefinition {
+                    name: tool.name.clone(),
+                    description: Some(tool.description.clone()),
+                    input_schema: tool.input_schema.clone(),
+                    required_permission: PermissionMode::Allow,
+                });
+            }
+            // Register clients globally for tool execution dispatch
+            let webhook = config.webhook.clone();
+            a2a::register_clients(clients, webhook);
+        }
+    }
+
+    // --- External Agents (OpenAI-compatible via proxy) ---
+    if let Some(ext_config) = external::load_external_config(None) {
+        let enabled_agents: Vec<_> = ext_config
+            .agents
+            .iter()
+            .filter(|a| a.enabled)
+            .collect();
+
+        for agent in &enabled_agents {
+            let tool_name = a2a::to_snake_case(&agent.id);
+            runtime_tools.push(RuntimeToolDefinition {
+                name: tool_name.clone(),
+                description: Some(agent.description.clone()),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "task": {
+                            "type": "string",
+                            "description": format!("委派给 {} 的完整自然语言任务", agent.name)
+                        }
+                    },
+                    "required": ["task"]
+                }),
+                required_permission: PermissionMode::Allow,
+            });
+        }
+
+        // Store external config globally for execution dispatch
+        external::config::register_external_config(ext_config);
+    }
+}
+
 fn build_runtime_plugin_state() -> Result<RuntimePluginState, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
     let loader = ConfigLoader::default_for(&cwd);
@@ -8682,7 +8795,11 @@ fn build_runtime_plugin_state_with_loader(
         .feature_config()
         .clone()
         .with_hooks(runtime_config.hooks().merged(&plugin_hook_config));
-    let (mcp_state, runtime_tools) = build_runtime_mcp_state(runtime_config)?;
+    let (mcp_state, mut runtime_tools) = build_runtime_mcp_state(runtime_config)?;
+
+    // --- A2A Integration Hook 1 & 2: Load config and append handoff tools ---
+    append_a2a_tools(&mut runtime_tools);
+
     let tool_registry = GlobalToolRegistry::with_plugin_tools(plugin_registry.aggregated_tools()?)?
         .with_runtime_tools(runtime_tools)?;
     Ok(RuntimePluginState {
@@ -8711,8 +8828,13 @@ fn build_runtime_plugin_state_with_existing_mcp(
         .with_hooks(runtime_config.hooks().merged(&plugin_hook_config));
 
     // Reuse existing MCP state and cached tool definitions
+    let mut runtime_tools = cached_mcp_tools.to_vec();
+
+    // --- A2A Integration Hook 1 & 2: Load config and append handoff tools ---
+    append_a2a_tools(&mut runtime_tools);
+
     let tool_registry = GlobalToolRegistry::with_plugin_tools(plugin_registry.aggregated_tools()?)?
-        .with_runtime_tools(cached_mcp_tools.to_vec())?;
+        .with_runtime_tools(runtime_tools)?;
     Ok(RuntimePluginState {
         feature_config,
         tool_registry,
@@ -10596,6 +10718,96 @@ impl CliToolExecutor {
         tool_name: &str,
         value: serde_json::Value,
     ) -> Result<String, ToolError> {
+        eprintln!("[A2A-DEBUG] execute_runtime_tool called with tool_name={}", tool_name);
+        // --- A2A Integration Hook 3: Dispatch to remote A2A Agent ---
+        // Read config at execution time to determine if this is an A2A tool
+        {
+            let a2a_config = runtime::a2a::load_a2a_config(None);
+            if let Some(ref config) = a2a_config {
+                for agent in &config.agents {
+                    if agent.enabled && agent.agent_type == "native" {
+                        if let Some(ref url) = agent.url {
+                            let expected_tool_name = runtime::a2a::to_snake_case(&agent.id);
+                            // Match by id (e.g., "weather") or by card-derived name (e.g., "weather_agent")
+                            // The tool name registered comes from Agent Card name, but we also try id-based match
+                            if expected_tool_name == tool_name
+                                || agent.id == tool_name
+                                || tool_name.starts_with(&expected_tool_name)
+                            {
+                                // This is an A2A tool — delegate to remote agent
+                                let task_text = value
+                                    .get("task")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let base_url = url.clone();
+                                let agent_name = agent.id.clone();
+                                // Use current tokio handle if available, otherwise create new runtime
+                                let result = match tokio::runtime::Handle::try_current() {
+                                    Ok(handle) => {
+                                        std::thread::scope(|s| {
+                                            s.spawn(|| {
+                                                let rt = tokio::runtime::Runtime::new().unwrap();
+                                                let card = runtime::a2a::client::AgentCard {
+                                                    name: agent_name.clone(),
+                                                    description: String::new(),
+                                                    skills: Vec::new(),
+                                                };
+                                                let client = runtime::a2a::A2aClient {
+                                                    id: agent_name.clone(),
+                                                    base_url: base_url.clone(),
+                                                    card,
+                                                };
+                                                rt.block_on(runtime::a2a::delegate_task(
+                                                    &client, &task_text, config.webhook.as_ref(),
+                                                ))
+                                            }).join().unwrap_or_else(|_| "[A2A] Error: thread panic".to_string())
+                                        })
+                                    }
+                                    Err(_) => {
+                                        let rt = tokio::runtime::Runtime::new()
+                                            .map_err(|e| ToolError::new(format!("[A2A] runtime: {}", e)))?;
+                                        let card = runtime::a2a::client::AgentCard {
+                                            name: agent_name.clone(),
+                                            description: String::new(),
+                                            skills: Vec::new(),
+                                        };
+                                        let client = runtime::a2a::A2aClient {
+                                            id: agent_name.clone(),
+                                            base_url: base_url.clone(),
+                                            card,
+                                        };
+                                        rt.block_on(runtime::a2a::delegate_task(
+                                            &client, &task_text, config.webhook.as_ref(),
+                                        ))
+                                    }
+                                };
+                                return Ok(result);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- External Agent dispatch (via backend proxy) ---
+        if runtime::external::config::is_external_tool(tool_name) {
+            let task_text = value
+                .get("task")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let (proxy_url, agent_id, _name) =
+                runtime::external::config::find_external_agent_by_tool_name(tool_name)
+                    .unwrap_or_default();
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| ToolError::new(format!("[External] runtime error: {}", e)))?;
+            let result = rt.block_on(runtime::external::call_external_agent(
+                &proxy_url, &agent_id, &task_text,
+            ));
+            return Ok(result);
+        }
+
         let Some(mcp_state) = &self.mcp_state else {
             return Err(ToolError::new(format!(
                 "runtime tool `{tool_name}` is unavailable without configured MCP servers"
@@ -10649,8 +10861,10 @@ impl ToolExecutor for CliToolExecutor {
         let result = if tool_name == "ToolSearch" {
             self.execute_search_tool(value)
         } else if self.tool_registry.has_runtime_tool(tool_name) {
+            eprintln!("[A2A-DEBUG] has_runtime_tool({}) = TRUE, dispatching to execute_runtime_tool", tool_name);
             self.execute_runtime_tool(tool_name, value)
         } else {
+            eprintln!("[A2A-DEBUG] has_runtime_tool({}) = FALSE, falling through to registry.execute", tool_name);
             self.tool_registry
                 .execute(tool_name, &value)
                 .map_err(ToolError::new)

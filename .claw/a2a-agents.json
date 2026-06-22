@@ -1,0 +1,14 @@
+{
+  "agents": [
+    {
+      "id": "weather",
+      "type": "native",
+      "url": "http://localhost:4000",
+      "enabled": true
+    }
+  ],
+  "options": {
+    "connectTimeoutMs": 5000,
+    "failFast": false
+  }
+}

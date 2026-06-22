@@ -1,0 +1,6 @@
+{
+  "name": "a2a-mcp-bridge",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "bridge.js"
+}

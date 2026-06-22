@@ -135,6 +135,8 @@ class AgUiClient {
   private abortController: AbortController | null = null;
   private streamTimeout: ReturnType<typeof setTimeout> | null = null;
   private connected = false;
+  private cancelling = false;
+  private cancelPromise: Promise<void> | null = null;
   private typewriter = new TypewriterBuffer();
   private thinkingTypewriter = new TypewriterBuffer('thinking');
 
@@ -161,8 +163,13 @@ class AgUiClient {
    * Send a prompt to the agent via AG-UI POST /agent endpoint.
    * Returns an SSE stream that updates the store in real-time.
    */
-  async sendPrompt(text: string, sessionId: string): Promise<void> {
-    if (!this.connected) {
+  async sendPrompt(text: string, sessionId: string, directAgentId?: string | null): Promise<void> {
+    // Wait for any pending cancel to finish (backend restarting claw-code)
+    if (this.cancelPromise) {
+      await this.cancelPromise;
+    }
+
+    if (!this.connected && !directAgentId) {
       console.warn('[AgUiClient] Not connected');
       return;
     }
@@ -178,7 +185,7 @@ class AgUiClient {
     this.resetStreamTimeout();
 
     // Build AG-UI request body
-    const body = {
+    const body: any = {
       threadId: sessionId,
       runId: `run-${Date.now()}`,
       messages: [{ id: `msg-${Date.now()}`, role: 'user', content: text }],
@@ -186,6 +193,11 @@ class AgUiClient {
       context: [],
       forwardedProps: {},
     };
+
+    // If a direct A2A agent is selected, add it to the request
+    if (directAgentId) {
+      body.directAgentId = directAgentId;
+    }
 
     // Debug log the outgoing prompt
     const store2 = useChatStore.getState();
@@ -605,7 +617,25 @@ class AgUiClient {
       store.finishStreaming(sessionId);
     }
     // Tell backend to kill the stuck claw-code process (stops hung PowerShell/bash commands)
-    fetch('/cancel', { method: 'POST' }).catch(() => {/* ignore */});
+    // Wait for the restart to complete before allowing new requests
+    this.cancelling = true;
+    const cancelTimeout = new Promise<void>((resolve) => setTimeout(resolve, 5000)); // 5s max wait
+    const cancelFetch = fetch('/cancel', { method: 'POST' })
+      .then((res) => {
+        if (res.ok) {
+          console.log('[AgUiClient] Backend cancel/restart completed');
+        } else {
+          console.warn('[AgUiClient] Backend cancel returned non-OK:', res.status);
+        }
+      })
+      .catch(() => {
+        console.warn('[AgUiClient] Backend cancel request failed (backend may be down)');
+      });
+    this.cancelPromise = Promise.race([cancelFetch, cancelTimeout])
+      .finally(() => {
+        this.cancelling = false;
+        this.cancelPromise = null;
+      });
   }
 
   // --- REST endpoints for non-streaming operations ---
@@ -623,7 +653,7 @@ class AgUiClient {
         if (data.model) useChatStore.getState().setCurrentModel(data.model);
         // Broadcast to other tabs
         broadcastConnectionUpdate('connected', data.model);
-        showToast('Connected to Frontier', 'success');
+        showToast('Connected to Hex.Frontier', 'success');
         return true;
       } else {
         showToast(data.error || 'Connection failed', 'error', 6000);
@@ -678,8 +708,8 @@ export const aguiClient = new AgUiClient();
 
 // --- Exported helper functions matching the old ws-client API ---
 
-export function sendPrompt(text: string, sessionId: string): void {
-  aguiClient.sendPrompt(text, sessionId);
+export function sendPrompt(text: string, sessionId: string, directAgentId?: string | null): void {
+  aguiClient.sendPrompt(text, sessionId, directAgentId);
 }
 
 export function sendReset(sessionId: string): void {

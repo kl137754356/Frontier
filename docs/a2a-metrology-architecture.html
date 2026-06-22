@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Frontier × A2A 多 Agent 测量复核与安全阀门架构</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-2: #1c2330;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --amber: #d29922;
+    --red: #f85149;
+    --purple: #bc8cff;
+    --cyan: #56d4dd;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 32px 24px 80px;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 26px; margin: 0 0 6px; font-weight: 650; }
+  h2 {
+    font-size: 18px; margin: 48px 0 16px; font-weight: 600;
+    padding-bottom: 8px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .subtitle { color: var(--muted); margin: 0 0 8px; font-size: 14px; }
+  .badge {
+    display: inline-block; font-size: 12px; padding: 2px 10px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--muted); margin-right: 6px;
+  }
+
+  /* ---- topology ---- */
+  .diagram {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 28px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+  }
+  .lane {
+    border: 1px dashed var(--border);
+    border-radius: 10px;
+    padding: 16px 18px 18px;
+    position: relative;
+  }
+  .lane-label {
+    position: absolute; top: -10px; left: 16px;
+    background: var(--panel); padding: 0 8px;
+    font-size: 12px; color: var(--muted); letter-spacing: .5px;
+  }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; }
+  .node {
+    flex: 1 1 200px; min-width: 190px; max-width: 280px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-left-width: 4px;
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .node h3 { margin: 0 0 4px; font-size: 15px; }
+  .node p { margin: 0; font-size: 12.5px; color: var(--muted); }
+  .node .tag { font-size: 11px; color: var(--muted); display: block; margin-top: 8px; }
+  .n-orch { border-left-color: var(--accent); }
+  .n-safety { border-left-color: var(--red); }
+  .n-exec { border-left-color: var(--green); }
+  .n-analyst { border-left-color: var(--purple); }
+  .n-infra { border-left-color: var(--cyan); }
+  .n-hw { border-left-color: var(--amber); }
+
+  .arrow-down {
+    text-align: center; color: var(--muted); font-size: 13px;
+    position: relative;
+  }
+  .arrow-down span {
+    background: var(--panel); padding: 0 12px; position: relative; z-index: 1;
+  }
+  .arrow-down::before {
+    content: ""; position: absolute; left: 0; right: 0; top: 50%;
+    border-top: 1px solid var(--border);
+  }
+
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 14px; font-size: 12px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+
+  /* ---- flow ---- */
+  .flow { display: flex; flex-direction: column; gap: 0; }
+  .step {
+    display: flex; gap: 14px; align-items: flex-start;
+    padding: 14px 0;
+  }
+  .step .idx {
+    flex: 0 0 32px; height: 32px; border-radius: 50%;
+    background: var(--panel-2); border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 600; color: var(--accent);
+  }
+  .step .body { flex: 1; }
+  .step .body strong { font-size: 14px; }
+  .step .body .who { font-size: 11px; color: var(--muted); margin-left: 8px; }
+  .step .body p { margin: 4px 0 0; font-size: 13px; color: var(--muted); }
+  .gate .idx { color: var(--red); border-color: var(--red); }
+  .gate .body strong { color: var(--red); }
+  .connector { margin-left: 16px; border-left: 1px dashed var(--border); height: 14px; }
+
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px 18px;
+  }
+  .card h3 { margin: 0 0 8px; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+  .card ul { margin: 0; padding-left: 18px; font-size: 13px; color: var(--muted); }
+  .card li { margin: 3px 0; }
+  .pill { font-size: 10.5px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); }
+  .pill.a2a { color: var(--accent); border-color: var(--accent); }
+  .pill.mcp { color: var(--green); border-color: var(--green); }
+  .pill.hw { color: var(--amber); border-color: var(--amber); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; }
+  td code { background: var(--panel-2); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+  .foot { margin-top: 40px; color: var(--muted); font-size: 12px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Frontier × A2A · 多 Agent 测量复核与安全阀门架构</h1>
+  <p class="subtitle">把单体测量逻辑拆为「编排 / 安全闸门 / 执行 / 分析复核」四类专职 Agent，物理动作收敛、结果二次校验、运动前强制放行。</p>
+  <div>
+    <span class="badge">A2A = Agent 间对等协作</span>
+    <span class="badge">MCP = Agent 调工具</span>
+    <span class="badge">A2UI = 人在回路确认</span>
+  </div>
+
+  <!-- ============ 拓扑图 ============ -->
+  <h2>① 系统拓扑</h2>
+  <div class="diagram">
+
+    <div class="lane">
+      <span class="lane-label">用户 / 前端</span>
+      <div class="row">
+        <div class="node n-infra">
+          <h3>Web Chat 前端</h3>
+          <p>AG-UI SSE 流 · A2UI 渲染确认弹窗</p>
+          <span class="tag">React · agui-client.ts · A2UIRenderer</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow-down"><span>AG-UI / SSE ↓↑</span></div>
+
+    <div class="lane">
+      <span class="lane-label">编排层 — A2A Client</span>
+      <div class="row">
+        <div class="node n-orch">
+          <h3>Frontier Orchestrator</h3>
+          <p>理解意图，编排下游 Agent，串起 task 链，回传进度给前端。</p>
+          <span class="tag">claw-code agent · A2A client</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow-down"><span>A2A · HTTP + JSON-RPC + SSE（携带鉴权 token）↓↑</span></div>
+
+    <div class="lane">
+      <span class="lane-label">专职 Agent 层 — 各自 A2A Server + Agent Card</span>
+      <div class="row">
+        <div class="node n-safety">
+          <h3>🛡 Safety / Guard Agent</h3>
+          <p>运动前置审查：碰撞域、探针速度、夹紧状态、行程范围。签发放行 token。</p>
+          <span class="tag">/.well-known/agent.json</span>
+        </div>
+        <div class="node n-exec">
+          <h3>⚙ Measurement Executor</h3>
+          <p>唯一持有硬件访问权。执行程序 / 测特征 / 读探针状态。需校验放行 token。</p>
+          <span class="tag">A2A server + MCP client</span>
+        </div>
+        <div class="node n-analyst">
+          <h3>🔬 Metrology Analyst</h3>
+          <p>不碰硬件。公差判定 / 重复性 / 趋势比对 / 异常标记，给出第二意见。</p>
+          <span class="tag">A2A server</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow-down"><span>MCP（仅 Executor）↓</span></div>
+
+    <div class="lane">
+      <span class="lane-label">工具 / 硬件层</span>
+      <div class="row">
+        <div class="node n-infra">
+          <h3>PC-DMIS MCP Server</h3>
+          <p>封装 COM 调用为工具：run_part_program · measure_feature · get_state</p>
+          <span class="tag">Content-Length stdio · 复用现有 mcp-server 写法</span>
+        </div>
+        <div class="node n-hw">
+          <h3>PC-DMIS COM</h3>
+          <p>PCDLRN.Application.20.2</p>
+          <span class="tag">真实 CMM / 探针</span>
+        </div>
+        <div class="node n-hw">
+          <h3>Hexagon Orca / Metrology AI</h3>
+          <p>localhost:8780 HTTP</p>
+          <span class="tag">辅助分析数据源</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="legend">
+      <span><i class="dot" style="background:var(--accent)"></i>编排</span>
+      <span><i class="dot" style="background:var(--red)"></i>安全闸门</span>
+      <span><i class="dot" style="background:var(--green)"></i>执行（持硬件权）</span>
+      <span><i class="dot" style="background:var(--purple)"></i>分析复核</span>
+      <span><i class="dot" style="background:var(--amber)"></i>硬件 / 外部</span>
+      <span><i class="dot" style="background:var(--cyan)"></i>基础设施</span>
+    </div>
+  </div>
+
+  <!-- ============ 流程图 ============ -->
+  <h2>② 一次测量的 Task 流程（含安全阀门）</h2>
+  <div class="diagram">
+    <div class="flow">
+      <div class="step">
+        <div class="idx">1</div>
+        <div class="body"><strong>接收意图</strong><span class="who">Orchestrator</span>
+          <p>用户「测一下这个零件的孔径」→ 解析为测量计划草案（程序名 / 特征 / 公差）。</p>
+        </div>
+      </div>
+      <div class="connector"></div>
+
+      <div class="step gate">
+        <div class="idx">🛡</div>
+        <div class="body"><strong>安全阀门 A · 运动前置审查</strong><span class="who">→ Safety Agent</span>
+          <p>检查碰撞域、探针速度、零件是否夹紧、是否超行程。通过则签发<strong>带签名的放行 token</strong>；否则中止并说明原因。</p>
+        </div>
+      </div>
+      <div class="connector"></div>
+
+      <div class="step gate">
+        <div class="idx">👤</div>
+        <div class="body"><strong>安全阀门 B · 人在回路（高风险才触发）</strong><span class="who">A2UI present_choices</span>
+          <p>首件 / 改程序 / 超行程等高风险动作，弹确认卡片给操作员，复用现有 A2UI。低风险自动跳过。</p>
+        </div>
+      </div>
+      <div class="connector"></div>
+
+      <div class="step">
+        <div class="idx">2</div>
+        <div class="body"><strong>执行测量</strong><span class="who">→ Executor Agent</span>
+          <p>校验放行 token 有效 → 通过 MCP 调 PC-DMIS COM 执行，流式回传进度。无 token 一律拒绝。</p>
+        </div>
+      </div>
+      <div class="connector"></div>
+
+      <div class="step">
+        <div class="idx">3</div>
+        <div class="body"><strong>独立复核</strong><span class="who">→ Analyst Agent</span>
+          <p>对结果做公差判定、重复性 / GR&R、与历史趋势比对，标记异常点，给出合格 / 复测 / 不合格结论。</p>
+        </div>
+      </div>
+      <div class="connector"></div>
+
+      <div class="step gate">
+        <div class="idx">↺</div>
+        <div class="body"><strong>判异分支</strong><span class="who">Orchestrator 决策</span>
+          <p>不合格或可疑 → 触发复测（回到步骤 1，复用同一安全链）或上报人工。合格 → 进入下一步。</p>
+        </div>
+      </div>
+      <div class="connector"></div>
+
+      <div class="step">
+        <div class="idx">4</div>
+        <div class="body"><strong>汇总与留痕</strong><span class="who">Orchestrator + Telemetry</span>
+          <p>结果回传前端；task id / 输入 / 放行记录 / 复核结论写入 telemetry（local-store），可追溯。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ Agent 职责卡 ============ -->
+  <h2>③ 各 Agent 职责与协议</h2>
+  <div class="card-grid">
+    <div class="card">
+      <h3>🧭 Frontier Orchestrator <span class="pill a2a">A2A Client</span></h3>
+      <ul>
+        <li>面向用户，理解意图与编排</li>
+        <li>按 task 链调用下游 Agent</li>
+        <li>判异分支决策（复测 / 上报）</li>
+        <li>不直接接触硬件</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>🛡 Safety / Guard <span class="pill a2a">A2A Server</span></h3>
+      <ul>
+        <li>运动前置审查规则引擎</li>
+        <li>签发 / 校验放行 token</li>
+        <li>判断是否需人在回路</li>
+        <li>可独立部署、独立升级</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>⚙ Measurement Executor <span class="pill a2a">A2A</span> <span class="pill mcp">MCP</span></h3>
+      <ul>
+        <li>唯一持硬件访问权的 Agent</li>
+        <li>无有效放行 token 拒绝执行</li>
+        <li>通过 MCP 调 PC-DMIS COM</li>
+        <li>流式回传执行进度</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>🔬 Metrology Analyst <span class="pill a2a">A2A Server</span></h3>
+      <ul>
+        <li>公差 / 重复性 / 趋势分析</li>
+        <li>对接 Orca 8780 辅助数据</li>
+        <li>给出独立第二意见</li>
+        <li>只读，不触发物理动作</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ============ 安全要点 ============ -->
+  <h2>④ 安全设计要点</h2>
+  <table>
+    <tr><th>维度</th><th>做法</th></tr>
+    <tr><td>Agent 间鉴权</td><td>A2A 之间用 bearer token / mTLS，Agent Card 声明 <code>securitySchemes</code>，本机也不裸跑。</td></tr>
+    <tr><td>物理动作闸门</td><td>Executor 收到运动类 task 必须携带 Safety 签发的放行 token，校验失败即拒。</td></tr>
+    <tr><td>人在回路</td><td>高风险动作通过 A2UI <code>present_choices</code> 弹操作员确认，复用现有组件。</td></tr>
+    <tr><td>审计留痕</td><td>每个 task 的 id / 输入 / 放行 / 复核结论写入 telemetry <code>local-store.ts</code>。</td></tr>
+    <tr><td>输入隔离</td><td>其他 Agent 的返回视为不可信数据，不得直接触发新的物理动作。</td></tr>
+    <tr><td>权限最小化</td><td>仅 Executor 持硬件权；Analyst / Safety 无任何驱动探针的能力。</td></tr>
+  </table>
+
+  <!-- ============ 落地阶段 ============ -->
+  <h2>⑤ 增量落地路径</h2>
+  <table>
+    <tr><th>阶段</th><th>交付物</th><th>说明</th></tr>
+    <tr><td>阶段一</td><td>PC-DMIS MCP Server</td><td>把现有 probe/state 脚本封成工具，复用 mcp-server 的 Content-Length 写法。独立可用。</td></tr>
+    <tr><td>阶段二</td><td>Executor A2A 外壳</td><td>用 @a2a-js/sdk 起 server，发布 Agent Card，把 MCP 工具映射为 A2A skill。</td></tr>
+    <tr><td>阶段三</td><td>Safety + Analyst Agent</td><td>加入安全闸门与独立复核，串成完整 task 链与判异回路。</td></tr>
+    <tr><td>阶段四</td><td>审计 + 人在回路</td><td>接 telemetry 留痕，高风险接 A2UI 确认，完成闭环。</td></tr>
+  </table>
+
+  <p class="foot">架构草案 · 供评审讨论 · 确定方向后可按阶段生成代码骨架</p>
+</div>
+</body>
+</html>

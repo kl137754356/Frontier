@@ -1,0 +1,13 @@
+{
+  "_comment": "仅用于本地开发，模拟数据库中的外部 Agent 配置。生产环境请使用加密存储，切勿提交真实 API Key。",
+  "agents": [
+    {
+      "id": "fastgpt-assistant",
+      "user_id": "dev-user-001",
+      "name": "FastGPT 助手",
+      "description": "回答产品文档相关问题。",
+      "base_url": "https://api.fastgpt.in/api/v1/chat/completions",
+      "api_key": "REPLACE_WITH_YOUR_FASTGPT_API_KEY"
+    }
+  ]
+}

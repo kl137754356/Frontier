@@ -29,7 +29,7 @@ export function Header({ onToggleSidebar, sidebarCollapsed, onLogout }: HeaderPr
       {/* Title */}
       <div className="flex items-center gap-2">
         <span className="text-ui font-semibold text-gray-800 dark:text-gray-100">
-          Frontier
+          Hex.Frontier
         </span>
       </div>
 
@@ -38,9 +38,6 @@ export function Header({ onToggleSidebar, sidebarCollapsed, onLogout }: HeaderPr
 
       {/* Right section: ConnectionStatus + Model + ThemeToggle + SettingsButton */}
       <div className="flex items-center gap-2">
-        {/* Connection status */}
-        <ConnectionIndicator status={connectionStatus} />
-
         {/* Logged-in username */}
         {connectionStatus === 'connected' && (
           (() => {
@@ -52,6 +49,9 @@ export function Header({ onToggleSidebar, sidebarCollapsed, onLogout }: HeaderPr
             ) : null;
           })()
         )}
+
+        {/* Connection status */}
+        <ConnectionIndicator status={connectionStatus} />
 
         {/* Theme toggle */}
         <button
