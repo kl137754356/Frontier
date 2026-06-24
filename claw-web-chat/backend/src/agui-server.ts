@@ -15,13 +15,17 @@
  */
 
 import { createServer, IncomingMessage, ServerResponse } from 'http';
-import { readFileSync, existsSync, statSync, writeFileSync, mkdirSync } from 'fs';
+import { readFileSync, existsSync, statSync, writeFileSync, mkdirSync, readdirSync, unlinkSync } from 'fs';
 import { join, extname, dirname } from 'path';
 import { TcpBridge } from './tcp-bridge.js';
 import { ClawProcess } from './claw-process.js';
 import { resolveSkill } from './ws-handler.js';
 import type { TcpServerMessage } from '../../shared/protocol.js';
 import type { PromptMeta } from '../../shared/protocol.js';
+import {
+  startTurn, recordToolStart, recordToolEnd, endTurn, endTurnWithError,
+  isToolCallLogEnabled, setToolCallLogEnabled, toggleToolCallLog,
+} from './tool-call-logger.js';
 
 // --- Session turn tracking for telemetry ---
 const sessionTurnCounters: Map<string, number> = new Map();
@@ -79,11 +83,16 @@ const clawProcess = new ClawProcess();
 // Connection state
 let connectingInProgress = false;
 let connectingTimer: ReturnType<typeof setTimeout> | null = null;
+let clawReady = false; // True only after claw sends 'ready' message
 let autoCompacting = false;
 let lastPromptText: string | null = null;
 let activeSSEResponse: ServerResponse | null = null; // Track active SSE response for [Question] interception
 let activeRunId: string | null = null;
 let activeMessageId: string | null = null;
+let pendingConfigRestart: { apiKey: string; baseUrl: string; model: string; reqId: string } | null = null;
+
+// Buffer recent MCP errors from claw stderr — keyed by tool name, used to inject errors into tool results
+let recentMcpErrors: Map<string, string> = new Map();
 let previousRunDraining = false; // True when waiting for old run_turn to finish before starting new one
 
 // --- Heartbeat Scheduler ---
@@ -96,6 +105,7 @@ interface HeartbeatTask {
   lastRun: number | null;
   runCount: number;
   stopped: boolean; // 新增：停止标志，用于立即停止正在运行的任务
+  paused: boolean;  // 暂停标志，暂停后不执行但保留任务
 }
 const heartbeatTasks: Map<string, HeartbeatTask> = new Map();
 // Buffer for heartbeat results — each entry has a unique id to allow frontend deduplication
@@ -153,14 +163,47 @@ function backgroundMessageHandler(msg: TcpServerMessage): void {
   handleHeartbeatTcpMsg(msg);
 }
 
+function pauseHeartbeatTask(id: string): boolean {
+  const task = heartbeatTasks.get(id);
+  if (!task) return false;
+  task.paused = true;
+  if (task.timer) { clearInterval(task.timer); task.timer = null; }
+  // Remove pending queue entries
+  heartbeatQueue.splice(0, heartbeatQueue.length, ...heartbeatQueue.filter(item => item.id !== id));
+  console.log(`[Heartbeat] Task '${id}' paused`);
+  saveHeartbeatTasks();
+  return true;
+}
+
+function resumeHeartbeatTask(id: string): boolean {
+  const task = heartbeatTasks.get(id);
+  if (!task || !task.paused) return false;
+  task.paused = false;
+  task.stopped = false;
+  // Re-create the interval
+  task.timer = setInterval(() => {
+    if (task.stopped || task.paused) return;
+    if (tcpBridge.isConnected()) {
+      console.log(`[Heartbeat] Queuing task '${id}': ${task.prompt.slice(0, 50)}`);
+      task.lastRun = Date.now();
+      task.runCount++;
+      heartbeatQueue.push({ id, prompt: task.prompt, task });
+      drainHeartbeatQueue();
+    }
+  }, task.intervalMs);
+  console.log(`[Heartbeat] Task '${id}' resumed`);
+  saveHeartbeatTasks();
+  return true;
+}
+
 function addHeartbeatTask(id: string, prompt: string, intervalMs: number): HeartbeatTask {
   // Remove existing task with same id
   removeHeartbeatTask(id);
-  const task: HeartbeatTask = { id, prompt, intervalMs, timer: null, createdAt: Date.now(), lastRun: null, runCount: 0, stopped: false };
+  const task: HeartbeatTask = { id, prompt, intervalMs, timer: null, createdAt: Date.now(), lastRun: null, runCount: 0, stopped: false, paused: false };
   task.timer = setInterval(() => {
-    // Check if task has been stopped (immediate stop of in-flight tasks)
-    if (task.stopped) {
-      console.log(`[Heartbeat] Task '${id}' is stopped, skipping execution`);
+    // Check if task has been stopped or paused
+    if (task.stopped || task.paused) {
+      if (task.stopped) console.log(`[Heartbeat] Task '${id}' is stopped, skipping execution`);
       return;
     }
 
@@ -178,6 +221,7 @@ function addHeartbeatTask(id: string, prompt: string, intervalMs: number): Heart
   }, intervalMs);
   heartbeatTasks.set(id, task);
   console.log(`[Heartbeat] Task '${id}' added: "${prompt}" every ${intervalMs / 1000}s`);
+  saveHeartbeatTasks();
   return task;
 }
 
@@ -193,6 +237,7 @@ function removeHeartbeatTask(id: string): boolean {
       ...heartbeatQueue.filter(item => item.id !== id)
     );
     console.log(`[Heartbeat] Task '${id}' removed and stopped (cleared ${before - heartbeatQueue.length} queued items)`);
+    saveHeartbeatTasks();
     return true;
   }
   return false;
@@ -212,7 +257,60 @@ function clearAllHeartbeatTasks(): number {
   heartbeatQueue.length = 0;
   heartbeatResultBuffer = [];
   console.log('[Heartbeat] All tasks cleared, queue and buffer flushed');
+  saveHeartbeatTasks();
   return count;
+}
+
+// --- Heartbeat Persistence ---
+const HEARTBEAT_PERSIST_PATH = join(
+  CLAW_WORKSPACE || process.cwd(),
+  '.claw',
+  'heartbeat-tasks.json'
+);
+
+interface PersistedHeartbeatTask {
+  id: string;
+  prompt: string;
+  intervalMs: number;
+  paused: boolean;
+}
+
+function saveHeartbeatTasks(): void {
+  try {
+    const tasks: PersistedHeartbeatTask[] = Array.from(heartbeatTasks.values()).map(t => ({
+      id: t.id,
+      prompt: t.prompt,
+      intervalMs: t.intervalMs,
+      paused: t.paused,
+    }));
+    mkdirSync(dirname(HEARTBEAT_PERSIST_PATH), { recursive: true });
+    writeFileSync(HEARTBEAT_PERSIST_PATH, JSON.stringify(tasks, null, 2), 'utf8');
+  } catch (err: any) {
+    console.warn('[Heartbeat] Failed to save tasks:', err.message);
+  }
+}
+
+function loadHeartbeatTasks(): void {
+  try {
+    if (!existsSync(HEARTBEAT_PERSIST_PATH)) return;
+    const raw = readFileSync(HEARTBEAT_PERSIST_PATH, 'utf8');
+    const tasks: PersistedHeartbeatTask[] = JSON.parse(raw);
+    if (!Array.isArray(tasks)) return;
+    let restored = 0;
+    for (const t of tasks) {
+      if (!t.id || !t.prompt || !t.intervalMs) continue;
+      const task = addHeartbeatTask(t.id, t.prompt, t.intervalMs);
+      if (t.paused) {
+        pauseHeartbeatTask(task.id);
+      }
+      restored++;
+    }
+    if (restored > 0) {
+      console.log(`[Heartbeat] Restored ${restored} task(s) from disk`);
+    }
+  } catch (err: any) {
+    console.warn('[Heartbeat] Failed to load tasks:', err.message);
+  }
 }
 
 // --- AG-UI Event Types ---
@@ -504,7 +602,7 @@ async function handleDirectA2AAgent(
 // --- POST /agent: AG-UI run endpoint ---
 async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await parseBody(req);
-  const { threadId, runId, messages, directAgentId } = body;
+  const { threadId, runId, messages, directAgentId, history } = body;
 
   // Extract the last user message as the prompt
   const lastUserMsg = [...(messages || [])].reverse().find((m: any) => m.role === 'user');
@@ -520,7 +618,7 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
     return;
   }
 
-  if (!tcpBridge.isConnected()) {
+  if (!tcpBridge.isConnected() || !clawReady) {
     res.writeHead(503, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Frontier not connected. POST /config first.' }));
     return;
@@ -710,7 +808,17 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
           for (const toolId of pendingToolIds) {
             const toolName = pendingToolNames.get(toolId) || 'unknown';
             console.log(`[AgUiServer]   - ${toolName} (id=${toolId})`);
-            sendSseEvent(res, { type: 'TOOL_CALL_END', toolCallId: toolId, result: '', isError: false });
+            // Check if there's a captured MCP error for this tool
+            const shortName = toolName.split('__').pop() || toolName;
+            const mcpError = recentMcpErrors.get(shortName) || recentMcpErrors.get(toolName);
+            if (mcpError) {
+              console.log(`[AgUiServer]   Injecting MCP error for ${toolName}: ${mcpError.slice(0, 100)}`);
+              sendSseEvent(res, { type: 'TOOL_CALL_END', toolCallId: toolId, result: mcpError, isError: true });
+              recentMcpErrors.delete(shortName);
+              recentMcpErrors.delete(toolName);
+            } else {
+              sendSseEvent(res, { type: 'TOOL_CALL_END', toolCallId: toolId, result: '', isError: false });
+            }
           }
           pendingToolIds.clear();
           pendingToolNames.clear();
@@ -749,18 +857,40 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
         if (msg.input) {
           console.log(`[AgUiServer] tool_input: ${msg.input.slice(0, 300)}`);
         }
+        // --- Tool Call Logger ---
+        recordToolStart(currentRunId, msg.id, msg.name, msg.input || '');
         break;
       }
 
       case 'tool_end': {
         // Remove from pending set
         const wasPending = pendingToolIds.delete(msg.id);
-        pendingToolNames.delete(msg.id);
         const timing = toolTimings.get(msg.id);
+        const toolNameForError = pendingToolNames.get(msg.id) || timing?.name || 'unknown';
+        pendingToolNames.delete(msg.id);
         if (timing) timing.end = Date.now();
         const toolDuration = timing ? (timing.end! - timing.start) : 0;
         console.log(`[AgUiServer] tool_end: ${timing?.name || 'unknown'} (id=${msg.id}) took ${toolDuration}ms, wasPending=${wasPending}, is_error=${msg.is_error}, output_len=${msg.output?.length || 0} [+${Date.now() - t0}ms]`);
-        sendSseEvent(res, { type: 'TOOL_CALL_END', toolCallId: msg.id, result: msg.output, isError: msg.is_error });
+
+        // If tool returned empty/null and we have a captured MCP error, inject it
+        let finalOutput = msg.output;
+        let finalIsError = msg.is_error;
+        if (!finalOutput || finalOutput.trim() === '') {
+          const shortName = toolNameForError.split('__').pop() || toolNameForError;
+          const mcpError = recentMcpErrors.get(shortName) || recentMcpErrors.get(toolNameForError);
+          if (mcpError) {
+            console.log(`[AgUiServer] Injecting captured MCP error into empty tool_end for ${toolNameForError}`);
+            finalOutput = mcpError;
+            finalIsError = true;
+            recentMcpErrors.delete(shortName);
+            recentMcpErrors.delete(toolNameForError);
+          }
+        }
+
+        sendSseEvent(res, { type: 'TOOL_CALL_END', toolCallId: msg.id, result: finalOutput, isError: finalIsError });
+
+        // --- Tool Call Logger ---
+        recordToolEnd(currentRunId, msg.id, finalOutput || '', finalIsError);
 
         // Detect a2ui_operations in tool output and emit as CUSTOM event
         if (!msg.is_error && msg.output) {
@@ -815,6 +945,8 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
             sendSseEvent(res, { type: 'TEXT_MESSAGE_END', messageId });
             textStarted = false;
           }
+          // --- Tool Call Logger: end turn (produced no content) ---
+          endTurn(currentRunId);
           sendSseEvent(res, { type: 'RUN_FINISHED', runId: currentRunId });
           cleanup();
           res.end();
@@ -831,6 +963,58 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
           textStarted = false;
         }
         sendSseEvent(res, { type: 'RUN_ERROR', runId: currentRunId, message: msg.text });
+
+        // --- Tool Call Logger: end turn with error ---
+        endTurnWithError(currentRunId, msg.text);
+
+        // Auto-restart with latest token on 401 (token expired during MCP init)
+        if (msg.text && (msg.text.includes('401') || msg.text.includes('Unauthorized') || msg.text.includes('Invalid token'))) {
+          const latestConfig = clawProcess.getConfig();
+          if (latestConfig && latestConfig.apiKey) {
+            console.log('[AgUiServer] 401 detected — auto-restart and retry prompt transparently');
+
+            // DON'T end the response — keep SSE open, retry transparently
+            // Send a custom event so frontend shows "reconnecting" indicator
+            sendSseEvent(res, { type: 'CUSTOM', name: 'token_refresh', data: { message: 'Token expired, reconnecting...' } });
+
+            // Restart claw with latest token, then re-send the prompt
+            const retryPrompt = finalPrompt;
+            setTimeout(async () => {
+              try {
+                await applyDeferredConfig({
+                  apiKey: latestConfig.apiKey,
+                  baseUrl: latestConfig.baseUrl || '',
+                  model: latestConfig.model || '',
+                  reqId: `401-retry-${Date.now().toString(36)}`,
+                });
+
+                if (!res.writableEnded && tcpBridge.isConnected() && clawReady) {
+                  console.log('[AgUiServer] 401 retry: claw restarted, re-sending prompt');
+                  // Re-register message handler for this run
+                  tcpBridge.removeAllListeners('message');
+                  tcpBridge.on('message', onMessage);
+                  tcpBridge.sendPrompt(retryPrompt, promptMeta);
+                } else {
+                  // Failed to recover — end with error
+                  sendSseEvent(res, { type: 'RUN_ERROR', runId: currentRunId, message: 'Token refresh failed. Please retry.' });
+                  cleanup();
+                  res.end();
+                }
+              } catch (err: any) {
+                console.warn('[AgUiServer] 401 auto-retry failed:', err.message);
+                if (!res.writableEnded) {
+                  sendSseEvent(res, { type: 'RUN_ERROR', runId: currentRunId, message: `Token refresh failed: ${err.message}` });
+                  cleanup();
+                  res.end();
+                }
+              }
+            }, 1000);
+            // Don't cleanup or end res — we're keeping the SSE connection alive for retry
+            previousRunDraining = false;
+            break;
+          }
+        }
+
         cleanup();
         res.end();
         previousRunDraining = false;
@@ -848,7 +1032,15 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
           for (const toolId of pendingToolIds) {
             const toolName = pendingToolNames.get(toolId) || 'unknown';
             console.log(`[AgUiServer]   - ${toolName} (id=${toolId})`);
-            sendSseEvent(res, { type: 'TOOL_CALL_END', toolCallId: toolId, result: '', isError: false });
+            const shortName = toolName.split('__').pop() || toolName;
+            const mcpError = recentMcpErrors.get(shortName) || recentMcpErrors.get(toolName);
+            if (mcpError) {
+              sendSseEvent(res, { type: 'TOOL_CALL_END', toolCallId: toolId, result: mcpError, isError: true });
+              recentMcpErrors.delete(shortName);
+              recentMcpErrors.delete(toolName);
+            } else {
+              sendSseEvent(res, { type: 'TOOL_CALL_END', toolCallId: toolId, result: '', isError: false });
+            }
           }
           pendingToolIds.clear();
           pendingToolNames.clear();
@@ -870,6 +1062,9 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
           }
         }
         // No fallback numbered list detection — only render A2UI when explicitly requested via tool
+
+        // --- Tool Call Logger: end turn ---
+        endTurn(currentRunId);
 
         sendSseEvent(res, { type: 'RUN_FINISHED', runId: currentRunId });
 
@@ -934,6 +1129,16 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
     tcpBridge.removeAllListeners('message');
     tcpBridge.on('message', backgroundMessageHandler);
     drainHeartbeatQueue();
+
+    // Apply deferred config restart (token refresh that was waiting for run to finish)
+    if (pendingConfigRestart) {
+      const pending = pendingConfigRestart;
+      pendingConfigRestart = null;
+      console.log(`[Config#${pending.reqId}] Applying deferred token restart now (run completed)`);
+      applyDeferredConfig(pending).catch((err: any) => {
+        console.warn(`[Config] Deferred restart failed:`, err.message);
+      });
+    }
   }
 
   // Handle client disconnect
@@ -956,13 +1161,48 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
   // Register the message handler for this run
   // Block heartbeat queue while user request is active; cleanup() will resume it
   userRunActive = true;
+
+  // Inject history BEFORE registering the SSE message handler
+  // This ensures compact's /done doesn't get consumed by onMessage
+  const turnIndex = sessionTurnCounters.get(threadId) ?? 0;
+  sessionTurnCounters.set(threadId, turnIndex + 1);
+
+  if (turnIndex === 0 && history && Array.isArray(history) && history.length > 0) {
+    const injectMessages = history
+      .filter((m: any) => m.role && m.content && m.content.trim())
+      .map((m: any) => ({ role: m.role, text: m.content.slice(0, 1500) }));
+    if (injectMessages.length > 0) {
+      const totalChars = injectMessages.reduce((sum: number, m: any) => sum + m.text.length, 0);
+      console.log(`[AgUiServer] Injecting ${injectMessages.length} history message(s) (${totalChars} chars) for session continuity`);
+      tcpBridge.sendInject(injectMessages);
+      await new Promise((r) => setTimeout(r, 300));
+
+      // If history is very large, compact it before sending prompt
+      if (totalChars > 50000) {
+        console.log(`[AgUiServer] History too large (${totalChars} chars), compacting...`);
+        // Use a dedicated listener for compact (backgroundMessageHandler is active)
+        tcpBridge.sendPrompt('/compact');
+        await new Promise<void>((resolve) => {
+          const compactTimeout = setTimeout(() => { resolve(); }, 15000);
+          const compactListener = (msg: TcpServerMessage) => {
+            if (msg.type === 'done' || msg.type === 'error') {
+              tcpBridge.off('message', compactListener);
+              clearTimeout(compactTimeout);
+              resolve();
+            }
+          };
+          tcpBridge.on('message', compactListener);
+        });
+        console.log(`[AgUiServer] Compact done, proceeding with prompt`);
+      }
+    }
+  }
+
+  // NOW register the SSE message handler (after inject/compact are fully done)
   tcpBridge.removeAllListeners('message');
   tcpBridge.on('message', onMessage);
 
   // Send the prompt to claw-code
-  // Build telemetry metadata for this turn
-  const turnIndex = sessionTurnCounters.get(threadId) ?? 0;
-  sessionTurnCounters.set(threadId, turnIndex + 1);
   const promptMeta: PromptMeta = {
     session_id: threadId || `session-${Date.now()}`,
     turn_id: currentRunId,
@@ -972,9 +1212,47 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
 
   console.log('[AgUiServer] Sending prompt to claw-code:', finalPrompt.slice(0, 100));
   tPromptSent = Date.now();
+
+  // --- Tool Call Logger: start tracking this turn ---
+  startTurn(currentRunId, threadId || '', finalPrompt);
+
   tcpBridge.sendPrompt(finalPrompt, promptMeta);
 }
 
+
+// --- Deferred config restart (applies token change after active run finishes) ---
+async function applyDeferredConfig(pending: { apiKey: string; baseUrl: string; model: string; reqId: string }): Promise<void> {
+  const { apiKey, baseUrl, model, reqId } = pending;
+  console.log(`[Config#${reqId}] Deferred restart: stopping old claw process`);
+  connectingInProgress = true;
+  clawReady = false; // Mark as not ready immediately to reject new requests during restart
+  try {
+    tcpBridge.disconnect();
+    await clawProcess.stop();
+    await new Promise((r) => setTimeout(r, 1000));
+
+    console.log(`[Config#${reqId}] Deferred restart: starting claw with new credentials`);
+    await clawProcess.start({ apiKey, baseUrl: baseUrl || undefined, model: model || undefined, port: CLAW_PORT });
+    await new Promise((r) => setTimeout(r, 3000));
+    await tcpBridge.connect('127.0.0.1', CLAW_PORT);
+
+    // Wait for ready
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(() => { tcpBridge.off('message', listener); resolve(); }, 20000);
+      const listener = (msg: TcpServerMessage) => {
+        if (msg.type === 'ready') { tcpBridge.off('message', listener); clearTimeout(timeout); resolve(); }
+      };
+      tcpBridge.on('message', listener);
+    });
+
+    console.log(`[Config#${reqId}] Deferred restart: SUCCESS`);
+    clawReady = true;
+  } catch (err: any) {
+    console.warn(`[Config#${reqId}] Deferred restart: FAILED —`, err.message);
+  } finally {
+    connectingInProgress = false;
+  }
+}
 
 // --- POST /config: Connect/configure claw-code ---
 async function handleConfig(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -1009,6 +1287,7 @@ async function handleConfig(req: IncomingMessage, res: ServerResponse): Promise<
   console.log(`[Config#${reqId}] current state — connected=${tcpBridge.isConnected()} running=${clawProcess.isRunning()} currentKey=${currentConfig?.apiKey ? currentConfig.apiKey.slice(0, 8) + '...' : '(none)'}`);
   if (tcpBridge.isConnected() && clawProcess.isRunning()) {
     const sameApiKey = (currentConfig?.apiKey || '') === (apiKey || '');
+    const sameBaseUrl = (currentConfig?.baseUrl || '') === (baseUrl || '');
     if (sameApiKey) {
       console.log(`[Config#${reqId}] SKIP — same token, reusing connection`);
       connectingInProgress = false;
@@ -1017,7 +1296,45 @@ async function handleConfig(req: IncomingMessage, res: ServerResponse): Promise<
       res.end(JSON.stringify({ status: 'connected', model: currentConfig?.model }));
       return;
     }
-    console.log(`[Config#${reqId}] RESTART — token changed (new account)`);
+
+    // Same gateway, different token.
+    // Just store the new token — DON'T restart claw.
+    // Reasons:
+    //   1. Frequent restarts cause claw crash loops (ECONNRESET)
+    //   2. The 401 auto-retry mechanism will restart with the latest stored token if needed
+    //   3. Front-end sends multiple config requests with different tokens during startup
+    if (sameBaseUrl) {
+      console.log(`[Config#${reqId}] SKIP — same gateway, storing new token (current may still be valid)`);
+      if (currentConfig) { (currentConfig as any).apiKey = apiKey; }
+      connectingInProgress = false;
+      if (connectingTimer) { clearTimeout(connectingTimer); connectingTimer = null; }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'connected', model: currentConfig?.model }));
+      return;
+    }
+
+    // If a user run is active, defer restart until it completes
+    // BUT: only defer if the new config is from the same provider (token refresh).
+    // If it's a completely different provider, reject — don't disrupt the active run.
+    if (activeSSEResponse && !activeSSEResponse.writableEnded) {
+      if (!sameBaseUrl && baseUrl !== (currentConfig?.baseUrl || '')) {
+        console.log(`[Config#${reqId}] REJECT — different provider config during active run (baseUrl=${baseUrl} vs current=${currentConfig?.baseUrl})`);
+        connectingInProgress = false;
+        if (connectingTimer) { clearTimeout(connectingTimer); connectingTimer = null; }
+        res.writeHead(409, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'rejected', message: 'Cannot switch provider during active run' }));
+        return;
+      }
+      console.log(`[Config#${reqId}] DEFER — token changed but user run is active, waiting...`);
+      connectingInProgress = false;
+      if (connectingTimer) { clearTimeout(connectingTimer); connectingTimer = null; }
+      pendingConfigRestart = { apiKey, baseUrl, model, reqId };
+      res.writeHead(202, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'deferred', message: 'Token update deferred until current run completes' }));
+      return;
+    }
+
+    console.log(`[Config#${reqId}] RESTART — baseUrl changed (different provider)`);
   }
 
   try {
@@ -1045,7 +1362,7 @@ async function handleConfig(req: IncomingMessage, res: ServerResponse): Promise<
     });
 
     // Wait for TCP listener — give claw.exe more time to initialize (MCP servers can be slow)
-    await new Promise((r) => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, 1500));
 
     console.log(`[Config#${reqId}] connecting TCP bridge`);
     // Connect TCP bridge — retry up to 5 times to handle port cleanup delays
@@ -1089,6 +1406,7 @@ async function handleConfig(req: IncomingMessage, res: ServerResponse): Promise<
     });
 
     console.log(`[Config#${reqId}] SUCCESS — model: ${model}, baseUrl: ${baseUrl || '(default)'}`);
+    clawReady = true;
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'connected', model }));
     console.log(`[AgUiServer] Connected — model: ${model}, baseUrl: ${baseUrl || '(default)'}`);
@@ -1145,12 +1463,15 @@ async function handleReset(req: IncomingMessage, res: ServerResponse): Promise<v
   res.end(JSON.stringify({ status: 'ok' }));
 }
 
-// --- POST /cancel: Kill the current claw-code run ---
-// Restarts claw-code process to unblock any stuck PowerShell/bash command.
-// The frontend should reconnect via POST /config after calling this.
+// --- POST /cancel: Cancel the current run ---
+// Soft cancel: just close the active SSE stream so frontend shows run as stopped.
+// claw-code finishes the current turn in the background (results discarded).
+// Session context is preserved — no restart needed.
+// Only force-restarts if body contains { force: true }.
 async function handleCancel(req: IncomingMessage, res: ServerResponse): Promise<void> {
   setCorsHeaders(res);
-  console.log('[AgUiServer] Cancel requested — restarting claw-code to unblock stuck run');
+  const body = await parseBody(req);
+  const forceRestart = body?.force === true;
 
   // Close active SSE connection so frontend knows run is over
   if (activeSSEResponse && !activeSSEResponse.writableEnded) {
@@ -1165,18 +1486,30 @@ async function handleCancel(req: IncomingMessage, res: ServerResponse): Promise<
   activeRunId = null;
   activeMessageId = null;
   previousRunDraining = false;
+  userRunActive = false;
 
-  // Restart claw-code — this kills any child processes (PowerShell, bash) it spawned
+  if (!forceRestart) {
+    // Soft cancel: let claw finish in background, discard output
+    console.log('[AgUiServer] Cancel requested — soft cancel (session preserved)');
+    // Re-register background handler to silently consume remaining messages from claw
+    tcpBridge.removeAllListeners('message');
+    tcpBridge.on('message', backgroundMessageHandler);
+    drainHeartbeatQueue();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'cancelled' }));
+    return;
+  }
+
+  // Force cancel: restart claw-code (kills stuck subprocesses, loses context)
+  console.log('[AgUiServer] Cancel requested — force restart (context will be lost)');
   const config = clawProcess.getConfig();
   if (config) {
     try {
       await clawProcess.stop();
       tcpBridge.disconnect();
       await clawProcess.start(config);
-      // Wait for TCP listener to be ready
       await new Promise((r) => setTimeout(r, 2000));
       await tcpBridge.connect('127.0.0.1', config.port);
-      // Wait for claw-code to send 'ready' (MCP initialization complete)
       await new Promise<void>((resolve) => {
         const readyTimeout = setTimeout(() => {
           console.log('[AgUiServer] Cancel restart: timed out waiting for ready, proceeding anyway');
@@ -1202,7 +1535,6 @@ async function handleCancel(req: IncomingMessage, res: ServerResponse): Promise<
       res.end(JSON.stringify({ error: 'Failed to restart' }));
     }
   } else {
-    // Not configured yet — just close anything active
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok' }));
   }
@@ -1309,13 +1641,19 @@ async function handleA2UIEvent(req: IncomingMessage, res: ServerResponse): Promi
 // --- GET /health ---
 function handleHealth(res: ServerResponse): void {
   setCorsHeaders(res);
+  const currentConfig = clawProcess.getConfig();
+  const activeToken = currentConfig?.apiKey || '';
+  // Simple hash: first 8 + last 4 chars of token (enough to detect change, not expose full token)
+  const activeTokenHash = activeToken ? activeToken.slice(0, 8) + activeToken.slice(-4) : '';
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({
-    status: tcpBridge.isConnected() ? 'ok' : 'degraded',
+    status: tcpBridge.isConnected() && clawReady ? 'ok' : 'degraded',
     tcp: tcpBridge.isConnected(),
     clawRunning: clawProcess.isRunning(),
+    clawReady,
     connectingInProgress,
     uptime: process.uptime(),
+    activeTokenHash,
   }));
 }
 
@@ -1622,6 +1960,95 @@ async function handleA2AAgents(req: any, res: any) {
   res.end(JSON.stringify({ error: 'Method not allowed' }));
 }
 
+// --- Session Persistence API ---
+// Per-user session storage: .claw/users/{username}/sessions.json
+const USERS_BASE_DIR = join(
+  process.env.CLAW_WORKSPACE || join(process.cwd(), '..', '..'),
+  '.claw',
+  'users'
+);
+
+function getUserSessionsPath(username: string): string {
+  // Sanitize username to prevent directory traversal
+  const safe = username.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+  return join(USERS_BASE_DIR, safe, 'sessions.json');
+}
+
+interface PersistedSessionData {
+  sessions: any[];
+  messages: Record<string, any[]>;
+  activeSessionId: string | null;
+}
+
+function loadUserSessions(username: string): PersistedSessionData | null {
+  const filePath = getUserSessionsPath(username);
+  try {
+    if (!existsSync(filePath)) return null;
+    const raw = readFileSync(filePath, 'utf8');
+    return JSON.parse(raw) as PersistedSessionData;
+  } catch (err) {
+    console.error(`[Sessions] Failed to load sessions for user '${username}':`, err);
+    return null;
+  }
+}
+
+function saveUserSessions(username: string, data: PersistedSessionData): void {
+  const filePath = getUserSessionsPath(username);
+  mkdirSync(dirname(filePath), { recursive: true });
+  writeFileSync(filePath, JSON.stringify(data), 'utf8');
+}
+
+async function handleSessions(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  setCorsHeaders(res);
+
+  // Extract username from query param or header
+  const url = new URL(req.url || '', 'http://localhost');
+  const username = url.searchParams.get('user') || req.headers['x-frontier-user'] as string || '';
+
+  if (!username) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Missing user identifier (query param ?user= or header X-Frontier-User)' }));
+    return;
+  }
+
+  // GET /sessions?user=xxx — load sessions
+  if (req.method === 'GET') {
+    const data = loadUserSessions(username);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(data || { sessions: [], messages: {}, activeSessionId: null }));
+    return;
+  }
+
+  // PUT /sessions?user=xxx — save sessions (full replace)
+  if (req.method === 'PUT') {
+    const body = await parseBody(req);
+    const { sessions, messages, activeSessionId } = body;
+    if (!Array.isArray(sessions) || typeof messages !== 'object') {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid body: need { sessions, messages, activeSessionId }' }));
+      return;
+    }
+    saveUserSessions(username, { sessions, messages, activeSessionId });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'saved' }));
+    return;
+  }
+
+  // DELETE /sessions?user=xxx — clear all sessions for user
+  if (req.method === 'DELETE') {
+    const filePath = getUserSessionsPath(username);
+    if (existsSync(filePath)) {
+      unlinkSync(filePath);
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'deleted' }));
+    return;
+  }
+
+  res.writeHead(405, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'Method not allowed' }));
+}
+
 // --- HTTP Server ---
 const server = createServer(async (req, res) => {
   // CORS preflight
@@ -1677,14 +2104,22 @@ const server = createServer(async (req, res) => {
           result = { status: removed ? 'ok' : 'not_found' };
           break;
         case 'list':
-          result = { tasks: listHeartbeatTasks().map(t => ({ id: t.id, prompt: t.prompt, intervalMs: t.intervalMs, lastRun: t.lastRun, runCount: t.runCount })) };
+          result = { tasks: listHeartbeatTasks().map(t => ({ id: t.id, prompt: t.prompt, intervalMs: t.intervalMs, lastRun: t.lastRun, runCount: t.runCount, paused: t.paused })) };
           break;
         case 'clear':
           const count = clearAllHeartbeatTasks();
           result = { status: 'ok', removed: count };
           break;
+        case 'pause':
+          const paused = pauseHeartbeatTask(id);
+          result = { status: paused ? 'ok' : 'not_found' };
+          break;
+        case 'resume':
+          const resumed = resumeHeartbeatTask(id);
+          result = { status: resumed ? 'ok' : 'not_found' };
+          break;
         default:
-          result = { error: 'Unknown action. Use: add, remove, list, clear' };
+          result = { error: 'Unknown action. Use: add, remove, list, clear, pause, resume' };
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
@@ -1701,9 +2136,66 @@ const server = createServer(async (req, res) => {
     } else if (req.method === 'POST' && req.url === '/auth/cli-login') {
       // --- Auth proxy: forward login to Gateway (avoids CORS/redirect issues) ---
       await handleAuthProxy(req, res);
+    } else if (req.method === 'POST' && req.url === '/auth/verify-token') {
+      // --- Token validation: check if a saved token is still valid ---
+      setCorsHeaders(res);
+      try {
+        const body = await parseBody(req);
+        const token = body.token;
+        if (!token) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ valid: false, reason: 'no token' }));
+          return;
+        }
+        // Make a lightweight request to the gateway to verify token
+        const verifyRes = await fetch('https://frontier.hexai.top/v1/models', {
+          headers: { 'Authorization': `Bearer ${token}` },
+          signal: AbortSignal.timeout(5000),
+        });
+        if (verifyRes.status === 401 || verifyRes.status === 403) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ valid: false, reason: 'token_expired' }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ valid: true }));
+        }
+      } catch (err: any) {
+        // Network error — can't verify, assume valid (optimistic)
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ valid: true, reason: 'verification_failed' }));
+      }
     } else if (req.url === '/a2a-agents' || req.url?.startsWith('/a2a-agents?')) {
       // --- A2A Agent Registry CRUD ---
       await handleA2AAgents(req, res);
+    } else if (req.url?.startsWith('/sessions')) {
+      // --- Session Persistence API ---
+      await handleSessions(req, res);
+    } else if (req.method === 'POST' && req.url === '/tool-log') {
+      // --- Tool Call Log Toggle ---
+      setCorsHeaders(res);
+      const body = await parseBody(req);
+      const { action: logAction } = body;
+      let result: any;
+      switch (logAction) {
+        case 'enable':
+          setToolCallLogEnabled(true);
+          result = { status: 'ok', enabled: true };
+          break;
+        case 'disable':
+          setToolCallLogEnabled(false);
+          result = { status: 'ok', enabled: false };
+          break;
+        case 'toggle':
+          const nowEnabled = toggleToolCallLog();
+          result = { status: 'ok', enabled: nowEnabled };
+          break;
+        case 'status':
+        default:
+          result = { status: 'ok', enabled: isToolCallLogEnabled() };
+          break;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
     } else if (serveStatic(req, res)) {
       // Served static file (production mode)
     } else {
@@ -1724,9 +2216,23 @@ const server = createServer(async (req, res) => {
 // Logging
 // Register background handler initially (handles heartbeat TCP responses when no user run is active)
 tcpBridge.on('message', backgroundMessageHandler);
-tcpBridge.on('connected', () => { console.log('[AgUiServer] TCP connected to claw-code'); });
+tcpBridge.on('connected', () => {
+  console.log('[AgUiServer] TCP connected to claw-code');
+  // Re-register background handler so heartbeat responses are captured
+  if (!userRunActive) {
+    tcpBridge.removeAllListeners('message');
+    tcpBridge.on('message', backgroundMessageHandler);
+    drainHeartbeatQueue();
+  }
+});
 tcpBridge.on('disconnected', () => {
   console.warn('[AgUiServer] TCP disconnected from claw-code');
+  clawReady = false;
+  // Clear in-flight heartbeat execution to prevent queue deadlock
+  if (heartbeatRunning) {
+    console.log('[Heartbeat] Clearing in-flight heartbeat due to TCP disconnect');
+    heartbeatRunning = null;
+  }
   // Don't auto-reconnect here — the 'exit' handler on clawProcess will handle restart
   // Auto-reconnect only if claw is still running (e.g., TCP glitch without process crash)
   setTimeout(() => {
@@ -1734,13 +2240,27 @@ tcpBridge.on('disconnected', () => {
     if (connectingInProgress) return;
     if (!tcpBridge.isConnected() && clawProcess.isRunning()) {
       console.log('[AgUiServer] Attempting TCP auto-reconnect (claw still running)...');
-      tcpBridge.connect('127.0.0.1', CLAW_PORT);
+      tcpBridge.connect('127.0.0.1', CLAW_PORT).catch((err: Error) => {
+        console.warn('[AgUiServer] TCP auto-reconnect failed:', err.message);
+      });
     }
   }, 3000);
 });
 tcpBridge.on('error', (err: Error) => { console.error('[AgUiServer] TCP error:', err.message); });
 clawProcess.on('log', (text: string) => {
   process.stderr.write(`[claw] ${text}`);
+
+  // Capture MCP tool errors from stderr to inject into tool results
+  const mcpErrorMatch = text.match(/Invalid arguments for tool\s+'([^']+)':\s*(.+)/s)
+    || text.match(/WARNING.*tool\s+'([^']+)'.*?:\s*(.+)/s)
+    || text.match(/Error.*tool\s+'([^']+)'.*?:\s*(.+)/s);
+  if (mcpErrorMatch) {
+    const toolName = mcpErrorMatch[1];
+    const errorDetail = mcpErrorMatch[2].replace(/\s+/g, ' ').trim().slice(0, 500);
+    recentMcpErrors.set(toolName, `MCP Error: Invalid arguments for tool '${toolName}': ${errorDetail}`);
+    // Auto-clear after 30s to avoid stale errors
+    setTimeout(() => { recentMcpErrors.delete(toolName); }, 30000);
+  }
 
   // Send keepalive to prevent frontend timeout while claw-code is processing
   if (activeSSEResponse && !activeSSEResponse.writableEnded && !text.includes('[Question]') && !questionBuffer) {
@@ -1829,7 +2349,11 @@ server.listen(PORT, () => {
   console.log(`  POST /config - Configure & connect Frontier`);
   console.log(`  POST /reset  - Reset session`);
   console.log(`  POST /slash  - Slash commands`);
+  console.log(`  POST /tool-log - Tool call log toggle (enable/disable/toggle/status)`);
   console.log(`  GET  /health - Health check`);
+  console.log(`  GET|PUT|DELETE /sessions - Session persistence (per-user)`);
+  // Restore persisted heartbeat tasks
+  loadHeartbeatTasks();
 });
 
 // Idle shutdown: if no frontend requests for 5 minutes, exit cleanly

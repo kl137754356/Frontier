@@ -2463,9 +2463,9 @@ fn handle_tcp_client(
     let reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
 
-    // 创建 LiveCli 实例（维护会话状态）
+    // 创建 LiveCli 实例（维护会话状态）— 跳过 MCP 初始化以加速 ready
     let resolved_model = resolve_repl_model(model.to_string());
-    let mut cli = LiveCli::new(resolved_model, true, None, permission_mode)?;
+    let mut cli = LiveCli::new_without_mcp(resolved_model, true, None, permission_mode)?;
     eprintln!("[claw-serve] [{peer}] LiveCli created, session: {}", cli.session.id);
 
     // 注入工具执行权限说明，确保模型知道它可以执行系统命令
@@ -5567,6 +5567,63 @@ impl LiveCli {
             allowed_tools.clone(),
             permission_mode,
             None,
+        )?;
+        let cli = Self {
+            model,
+            allowed_tools,
+            permission_mode,
+            system_prompt,
+            runtime,
+            session,
+            prompt_history: Vec::new(),
+        };
+        cli.persist_session()?;
+        Ok(cli)
+    }
+
+    /// Lightweight constructor that skips MCP initialization (for --serve mode).
+    /// MCP will be initialized on the first prompt via handle_prompt's cached_mcp_state check.
+    fn new_without_mcp(
+        model: String,
+        enable_tools: bool,
+        allowed_tools: Option<AllowedToolSet>,
+        permission_mode: PermissionMode,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let system_prompt = build_system_prompt(&model)?;
+        let session_state = new_cli_session()?;
+        let session = create_managed_session_handle(&session_state.session_id)?;
+        // Build a minimal runtime without MCP — use empty plugin state
+        let empty_plugin_state = RuntimePluginState {
+            feature_config: {
+                let cwd = env::current_dir()?;
+                let loader = ConfigLoader::default_for(&cwd);
+                let runtime_config = loader.load()?;
+                let plugin_manager = build_plugin_manager(&cwd, &loader, &runtime_config);
+                let plugin_registry = plugin_manager.plugin_registry()?;
+                let plugin_hook_config = runtime_hook_config_from_plugin_hooks(plugin_registry.aggregated_hooks()?);
+                runtime_config.feature_config().clone().with_hooks(runtime_config.hooks().merged(&plugin_hook_config))
+            },
+            tool_registry: GlobalToolRegistry::with_plugin_tools(vec![])?,
+            plugin_registry: {
+                let cwd = env::current_dir()?;
+                let loader = ConfigLoader::default_for(&cwd);
+                let runtime_config = loader.load()?;
+                let plugin_manager = build_plugin_manager(&cwd, &loader, &runtime_config);
+                plugin_manager.plugin_registry()?
+            },
+            mcp_state: None,
+        };
+        let runtime = build_runtime_with_plugin_state(
+            session_state.with_persistence_path(session.path.clone()),
+            &session.id,
+            model.clone(),
+            system_prompt.clone(),
+            enable_tools,
+            true,
+            allowed_tools.clone(),
+            permission_mode,
+            None,
+            empty_plugin_state,
         )?;
         let cli = Self {
             model,
@@ -10466,6 +10523,71 @@ fn format_grep_result(icon: &str, parsed: &serde_json::Value) -> String {
     }
 }
 
+/// Intelligently summarize a large JSON tool output while preserving key structure.
+/// Strategy: Keep top-level keys, truncate long string values, limit array items,
+/// and recursively slim down nested objects.
+fn smart_truncate_json(value: &serde_json::Value, max_bytes: usize) -> String {
+    let slimmed = slim_json_value(value, 3); // max depth 3
+    let result = serde_json::to_string_pretty(&slimmed).unwrap_or_else(|_| format!("{}", value));
+    if result.len() <= max_bytes {
+        return result;
+    }
+    // If still too large after slimming, do a final hard cut with context
+    let cut = &result[..max_bytes];
+    format!("{}\n\n[JSON SUMMARIZED: original structure preserved with values trimmed. Total {} bytes reduced to fit context window.]", cut, result.len())
+}
+
+/// Safely truncate a string to at most `max_bytes` bytes without panicking.
+/// Finds the last valid char boundary at or before `max_bytes`.
+fn safe_truncate(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    // Walk backwards from max_bytes to find a char boundary
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+fn slim_json_value(value: &serde_json::Value, depth: usize) -> serde_json::Value {
+    use serde_json::Value;
+    if depth == 0 {
+        return match value {
+            Value::String(s) => Value::String(if s.len() > 100 { format!("{}...", safe_truncate(s, 100)) } else { s.clone() }),
+            Value::Array(arr) => Value::String(format!("[Array with {} items]", arr.len())),
+            Value::Object(_) => Value::String("[Object - depth limit reached]".to_string()),
+            other => other.clone(),
+        };
+    }
+    match value {
+        Value::Object(map) => {
+            let mut result = serde_json::Map::new();
+            for (k, v) in map {
+                result.insert(k.clone(), slim_json_value(v, depth - 1));
+            }
+            Value::Object(result)
+        }
+        Value::Array(arr) => {
+            // Keep first 3 items + count
+            let mut items: Vec<Value> = arr.iter().take(3).map(|v| slim_json_value(v, depth - 1)).collect();
+            if arr.len() > 3 {
+                items.push(Value::String(format!("... and {} more items", arr.len() - 3)));
+            }
+            Value::Array(items)
+        }
+        Value::String(s) => {
+            if s.len() > 500 {
+                Value::String(format!("{}... [{}B total]", safe_truncate(s, 500), s.len()))
+            } else {
+                Value::String(s.clone())
+            }
+        }
+        other => other.clone(),
+    }
+}
+
 fn format_generic_tool_result(icon: &str, name: &str, parsed: &serde_json::Value) -> String {
     let rendered_output = match parsed {
         serde_json::Value::String(text) => text.clone(),
@@ -10856,7 +10978,14 @@ impl ToolExecutor for CliToolExecutor {
                 "tool `{tool_name}` is not enabled by the current --allowedTools setting"
             )));
         }
-        let value = serde_json::from_str(input)
+        // Normalize empty/missing tool input to empty JSON object.
+        // Models sometimes call tools with no arguments (empty string), which is valid
+        // when the tool schema has no required properties.
+        let normalized_input = match input.trim() {
+            "" => "{}",
+            s => s,
+        };
+        let value = serde_json::from_str(normalized_input)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
         let result = if tool_name == "ToolSearch" {
             self.execute_search_tool(value)
@@ -10871,13 +11000,28 @@ impl ToolExecutor for CliToolExecutor {
         };
         match result {
             Ok(output) => {
+                // Smart size management for oversized tool outputs
+                let max_tool_output = 30000; // ~7500 tokens
+                let final_output = if output.len() > max_tool_output {
+                    // Try to intelligently summarize JSON structure
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&output) {
+                        smart_truncate_json(&parsed, max_tool_output)
+                    } else {
+                        // Non-JSON: keep first + last portions with context
+                        let head = &output[..max_tool_output / 2];
+                        let tail = &output[output.len() - 5000..];
+                        format!("{}...\n\n[CONTENT SUMMARIZED: {} bytes total. Middle section omitted. Showing first and last portions.]\n\n...{}", head, output.len(), tail)
+                    }
+                } else {
+                    output
+                };
                 if self.emit_output {
-                    let markdown = format_tool_result(tool_name, &output, false);
+                    let markdown = format_tool_result(tool_name, &final_output, false);
                     self.renderer
                         .stream_markdown(&markdown, &mut io::stdout())
                         .map_err(|error| ToolError::new(error.to_string()))?;
                 }
-                Ok(output)
+                Ok(final_output)
             }
             Err(error) => {
                 if self.emit_output {
@@ -11024,7 +11168,7 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                         id: id.clone(),
                         name: name.clone(),
                         input: serde_json::from_str(input)
-                            .unwrap_or_else(|_| serde_json::json!({ "raw": input })),
+                            .unwrap_or_else(|_| if input.trim().is_empty() { serde_json::json!({}) } else { serde_json::json!({ "raw": input }) }),
                     }),
                     ContentBlock::ToolResult {
                         tool_use_id,

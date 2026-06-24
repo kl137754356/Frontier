@@ -16,6 +16,18 @@ import { showToast } from '../components/Notifications';
 
 const STREAM_TIMEOUT_MS = 120_000; // 2 minutes — no response timeout
 
+/**
+ * Force logout: clear saved token and reload page to show login screen.
+ * Called when we detect 401/token_expired from the API.
+ */
+function forceLogout(): void {
+  localStorage.removeItem('frontier_token_expires_at');
+  localStorage.removeItem('frontier_username');
+  showToast('登录已过期，请重新登录', 'warning', 5000);
+  // Reload after a short delay so the toast is visible
+  setTimeout(() => { window.location.reload(); }, 1500);
+}
+
 // --- Cross-tab sync via BroadcastChannel ---
 const tabChannel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('frontier-sync') : null;
 if (tabChannel) {
@@ -137,6 +149,7 @@ class AgUiClient {
   private connected = false;
   private cancelling = false;
   private cancelPromise: Promise<void> | null = null;
+  private _retryCount = 0;
   private typewriter = new TypewriterBuffer();
   private thinkingTypewriter = new TypewriterBuffer('thinking');
 
@@ -184,11 +197,37 @@ class AgUiClient {
     }
     this.resetStreamTimeout();
 
+    // Wait for claw to be fully ready before sending (MCP initialization can take 1-2 min)
+    if (!directAgentId) {
+      for (let i = 0; i < 60; i++) { // wait up to 3 minutes
+        try {
+          const healthRes = await fetch('/health', { signal: AbortSignal.timeout(2000) });
+          if (healthRes.ok) {
+            const h = await healthRes.json();
+            if (h.clawReady) break;
+          }
+        } catch {}
+        await new Promise(r => setTimeout(r, 3000));
+      }
+    }
+
     // Build AG-UI request body
+    const allMessages = useChatStore.getState().messages[sessionId] || [];
+    // Include conversation history (last N messages) for context continuity
+    const historyMessages = allMessages
+      .filter(m => m.status === 'complete' && m.content.length > 0)
+      .map(m => ({
+        role: m.role,
+        content: m.content.filter(c => c.type === 'text').map(c => (c as any).text).join('\n'),
+      }))
+      .filter(m => m.content.trim() && m.content.trim().length > 5)
+      .filter((m, i, arr) => i === 0 || m.content !== arr[i - 1].content); // all meaningful, deduplicated
+
     const body: any = {
       threadId: sessionId,
       runId: `run-${Date.now()}`,
       messages: [{ id: `msg-${Date.now()}`, role: 'user', content: text }],
+      history: historyMessages,
       tools: [],
       context: [],
       forwardedProps: {},
@@ -220,10 +259,29 @@ class AgUiClient {
 
       if (!response.ok) {
         const err = await response.json().catch(() => ({ error: response.statusText }));
-        store.errorStreaming(sessionId, err.error || 'Request failed');
+        const errorMsg = err.error || 'Request failed';
+
+        // Auto-retry on 503 (backend restarting) — wait and retry up to 3 times
+        if (response.status === 503 && (!this._retryCount || this._retryCount < 3)) {
+          this._retryCount = (this._retryCount || 0) + 1;
+          console.log(`[AgUiClient] 503 received (attempt ${this._retryCount}/3), retrying in 3s...`);
+          store.errorStreaming(sessionId, '⏳ 后端重启中，自动重试...');
+          this.clearStreamTimeout();
+          await new Promise(r => setTimeout(r, 3000));
+          // Re-send the same message
+          return this.sendPrompt(text, sessionId, directAgentId);
+        }
+        this._retryCount = 0;
+
+        store.errorStreaming(sessionId, errorMsg);
+        // Auto-logout on 401 (token expired)
+        if (response.status === 401 || errorMsg.includes('401') || errorMsg.includes('token_expired') || errorMsg.includes('Unauthorized')) {
+          forceLogout();
+        }
         this.clearStreamTimeout();
         return;
       }
+      this._retryCount = 0;
 
       const reader = response.body?.getReader();
       if (!reader) {
@@ -424,9 +482,36 @@ class AgUiClient {
 
       case 'RUN_ERROR':
         if (store.isStreaming) {
+          // Close any pending tool calls with error state before finishing
+          if (store.streamingMessageId) {
+            const msgs = store.messages[sessionId] || [];
+            const sm = msgs.find(m => m.id === store.streamingMessageId);
+            if (sm) {
+              const toolUseIds = sm.content.filter(c => c.type === 'tool_use').map(c => c.id);
+              const toolResultIds = sm.content.filter(c => c.type === 'tool_result').map(c => (c as any).toolUseId);
+              const pendingToolIds = toolUseIds.filter(id => !toolResultIds.includes(id));
+              if (pendingToolIds.length > 0) {
+                const errorResults = pendingToolIds.map(id => ({
+                  type: 'tool_result' as const,
+                  toolUseId: id,
+                  toolName: '',
+                  output: '[中止] 操作已取消',
+                  isError: true,
+                }));
+                const uc = [...sm.content, ...errorResults];
+                useChatStore.setState({
+                  messages: { ...store.messages, [sessionId]: msgs.map(m => m.id === store.streamingMessageId ? { ...m, content: uc } : m) },
+                });
+              }
+            }
+          }
           store.errorStreaming(sessionId, event.message || 'Agent error');
         } else {
           showToast(event.message || 'Agent error', 'error', 6000);
+        }
+        // Don't force logout on 401 from claw — backend auto-restarts with fresh token
+        if (event.message && (event.message.includes('401') || event.message.includes('token_expired') || event.message.includes('Unauthorized'))) {
+          showToast('Token expired, reconnecting... Please retry in a few seconds.', 'warning', 5000);
         }
         this.clearStreamTimeout();
         break;
