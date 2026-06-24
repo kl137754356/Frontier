@@ -189,6 +189,9 @@ export function recordToolEnd(runId: string, toolId: string, output: string, isE
   } else {
     logLine(`[ToolCallLogger]   Output:   ${formatPayload(output)}`);
   }
+
+  // Extract and display MCP substeps (function calls within the tool)
+  extractAndLogSubsteps(output, entry.index);
 }
 
 /**
@@ -266,6 +269,49 @@ export function endTurnWithError(runId: string, errorText: string): void {
   logLine('');
 
   activeTurns.delete(runId);
+}
+
+// --- MCP Substep Extraction ---
+
+function extractAndLogSubsteps(output: string, toolIndex: number): void {
+  try {
+    const parsed = JSON.parse(output);
+    // MCP responses have content[].text which is a JSON string containing results
+    const contentText = parsed?.content?.[0]?.text || parsed?.structuredContent?.result;
+    if (!contentText) return;
+
+    const inner = typeof contentText === 'string' ? JSON.parse(contentText) : contentText;
+    // Look for results[].substeps[] or results[].result.substeps[]
+    const results = inner?.details?.results || [];
+    for (const result of results) {
+      const substeps = result?.result?.substeps || result?.substeps || [];
+      if (substeps.length === 0) continue;
+
+      logLine(`[ToolCallLogger]   ┌─ MCP Functions (Tool #${toolIndex}, op="${result.op || '?'}"):`);
+      for (const sub of substeps) {
+        const status = sub.status || '?';
+        const icon = status === 'ok' ? '✓' : status === 'error' ? '✗' : '⚠';
+        logLine(`[ToolCallLogger]   │ ${icon} ${sub.tool || '?'}(${JSON.stringify(sub.args || {})})`);
+        logLine(`[ToolCallLogger]   │   → ${status}: ${sub.message || sub.result?.message || ''}`);
+        if (sub.result?.details && typeof sub.result.details === 'object') {
+          // Log key details (compact)
+          const details = sub.result.details;
+          const keys = Object.keys(details).slice(0, 5);
+          if (keys.length > 0) {
+            const summary = keys.map(k => {
+              const v = details[k];
+              const vs = typeof v === 'string' ? v : JSON.stringify(v);
+              return `${k}=${vs && vs.length > 60 ? vs.slice(0, 60) + '...' : vs}`;
+            }).join(', ');
+            logLine(`[ToolCallLogger]   │   details: ${summary}`);
+          }
+        }
+      }
+      logLine(`[ToolCallLogger]   └─`);
+    }
+  } catch {
+    // Not parseable or no substeps — skip silently
+  }
 }
 
 // --- Helpers ---

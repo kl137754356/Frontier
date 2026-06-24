@@ -651,8 +651,26 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
   let tFirstChunk = 0;   // When first text chunk arrived
   const toolTimings: Map<string, { name: string; start: number; end?: number }> = new Map();
 
-  // If a previous run was interrupted, we need to skip its remaining messages
-  // until we see its 'done', then start processing new run's messages
+  // If a previous run was interrupted, wait for it to finish before sending new prompt
+  if (previousRunDraining) {
+    console.log('[AgUiServer] Waiting for previous run to finish draining before sending new prompt...');
+    const drainStart = Date.now();
+    await new Promise<void>((resolve) => {
+      const checkInterval = setInterval(() => {
+        if (!previousRunDraining || Date.now() - drainStart > 45000) {
+          clearInterval(checkInterval);
+          if (previousRunDraining) {
+            console.log('[AgUiServer] Drain wait timeout (45s), proceeding anyway');
+            previousRunDraining = false;
+          } else {
+            console.log('[AgUiServer] Previous run finished, proceeding with new prompt');
+          }
+          resolve();
+        }
+      }, 500);
+    });
+  }
+
   let skipStaleMessages = previousRunDraining;
 
   // Auto-clear skip after 10s to prevent permanent blocking
@@ -759,7 +777,10 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
     }
 
     if (!tFirstMsg) tFirstMsg = Date.now();
-    console.log('[AgUiServer] TCP message received:', msg.type, msg.type === 'chunk' ? `(${(msg as any).text?.length} chars)` : '', `[+${Date.now() - t0}ms]`);
+    // Only log non-chunk messages to reduce noise (chunks are too frequent)
+    if (msg.type !== 'chunk') {
+      console.log('[AgUiServer] TCP message received:', msg.type, `[+${Date.now() - t0}ms]`);
+    }
 
     // Auto-compact on context window overflow
     if (msg.type === 'error' && msg.text.includes('Context window blocked') && !autoCompacting && lastPromptText) {
@@ -1156,6 +1177,11 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
     clawProcess.writeStdin('1'); // Send any valid choice to unblock stdin read
     questionBuffer = '';
     if (questionBufferTimer) { clearTimeout(questionBufferTimer); questionBufferTimer = null; }
+  } else if (previousRunDraining) {
+    // Previous run may be blocked on stdin even though questionBuffer was already cleared (timeout).
+    // Send a newline to unblock any pending stdin read.
+    console.log('[AgUiServer] Sending stdin newline to unblock potentially stuck previous run');
+    clawProcess.writeStdin('');
   }
 
   // Register the message handler for this run
@@ -1233,8 +1259,20 @@ async function applyDeferredConfig(pending: { apiKey: string; baseUrl: string; m
 
     console.log(`[Config#${reqId}] Deferred restart: starting claw with new credentials`);
     await clawProcess.start({ apiKey, baseUrl: baseUrl || undefined, model: model || undefined, port: CLAW_PORT });
-    await new Promise((r) => setTimeout(r, 3000));
-    await tcpBridge.connect('127.0.0.1', CLAW_PORT);
+
+    // Retry TCP connection up to 5 times (claw may take a moment to bind the port)
+    let connected = false;
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        await tcpBridge.connect('127.0.0.1', CLAW_PORT);
+        connected = true;
+        break;
+      } catch (e: any) {
+        console.warn(`[Config#${reqId}] TCP connect attempt ${attempt}/5 failed: ${e.message}`);
+        if (attempt === 5) throw e;
+      }
+    }
 
     // Wait for ready
     await new Promise<void>((resolve) => {
@@ -1489,12 +1527,43 @@ async function handleCancel(req: IncomingMessage, res: ServerResponse): Promise<
   userRunActive = false;
 
   if (!forceRestart) {
-    // Soft cancel: let claw finish in background, discard output
-    console.log('[AgUiServer] Cancel requested — soft cancel (session preserved)');
-    // Re-register background handler to silently consume remaining messages from claw
+    // Soft cancel: mark as draining so new messages wait for claw to finish current turn
+    console.log('[AgUiServer] Cancel requested — soft cancel (session preserved, waiting for claw to finish)');
+    previousRunDraining = true;
+
+    // Re-register background handler to consume remaining messages from claw
     tcpBridge.removeAllListeners('message');
-    tcpBridge.on('message', backgroundMessageHandler);
-    drainHeartbeatQueue();
+    const drainListener = (msg: TcpServerMessage) => {
+      if (msg.type === 'done' || msg.type === 'error') {
+        previousRunDraining = false;
+        tcpBridge.removeAllListeners('message');
+        tcpBridge.on('message', backgroundMessageHandler);
+        drainHeartbeatQueue();
+        console.log('[AgUiServer] Soft cancel: old run finished draining');
+      }
+    };
+    tcpBridge.on('message', drainListener);
+
+    // Safety timeout: if claw doesn't finish in 30s, force restart
+    setTimeout(async () => {
+      if (previousRunDraining) {
+        console.log('[AgUiServer] Soft cancel drain timeout (30s) — force restarting claw');
+        previousRunDraining = false;
+        const config = clawProcess.getConfig();
+        if (config) {
+          try {
+            tcpBridge.disconnect();
+            await clawProcess.stop();
+            await new Promise(r => setTimeout(r, 1000));
+            await clawProcess.start(config);
+            // TCP reconnect handled by the 'exit' handler auto-restart logic
+          } catch (err: any) {
+            console.warn('[AgUiServer] Force restart after cancel timeout failed:', err.message);
+          }
+        }
+      }
+    }, 30000);
+
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'cancelled' }));
     return;
@@ -2282,6 +2351,11 @@ clawProcess.on('log', (text: string) => {
           // Send a2ui render event — keep SSE open for continued response after user answers
           sendSseEvent(activeSSEResponse, { type: 'CUSTOM', name: 'a2ui_render', data: { operations: a2uiData.a2ui_operations } });
           // Don't end SSE or set activeSSEResponse to null — claw-code will continue after stdin reply
+        } else {
+          // Free-text question (no numbered options) — send a default response via stdin
+          // to unblock claw. The model will proceed with a generic answer.
+          console.log('[AgUiServer] Intercepted [Question] (free-text, no options) — sending default stdin response');
+          clawProcess.writeStdin('continue');
         }
       }
       questionBuffer = '';
