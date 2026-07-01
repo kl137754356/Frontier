@@ -5,6 +5,8 @@ import { SlashCommandMenu } from './SlashCommandMenu';
 import { AgentSelector } from './AgentSelector';
 import { A2AAgentManager } from './A2AAgentManager';
 import { A2AAgentList } from './A2AAgentList';
+import { HeartbeatManager } from './HeartbeatManager';
+import { HookManager } from './HookManager';
 import type { Message } from '@shared/types';
 
 // Known skill names that can be invoked as bare words
@@ -35,6 +37,7 @@ function isBareWordSkill(text: string): boolean {
 export function InputArea() {
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const isStreaming = useChatStore((s) => s.isStreaming);
+  const connectionStatus = useChatStore((s) => s.connectionStatus);
   const addMessage = useChatStore((s) => s.addMessage);
   const startStreaming = useChatStore((s) => s.startStreaming);
   const sessions = useChatStore((s) => s.sessions);
@@ -46,6 +49,8 @@ export function InputArea() {
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   const [showAgentMenu, setShowAgentMenu] = useState(false);
   const [showA2AManager, setShowA2AManager] = useState(false);
+  const [showHeartbeat, setShowHeartbeat] = useState(false);
+  const [showHooks, setShowHooks] = useState(false);
   const [directA2AAgentId, setDirectA2AAgentId] = useState<string | null>(null);
   const [directA2AAgentName, setDirectA2AAgentName] = useState<string | null>(null);
   const [skillSuggestions, setSkillSuggestions] = useState<{ label: string; text: string }[] | null>(null);
@@ -190,7 +195,7 @@ export function InputArea() {
   // Token usage display
   const activeSession = sessions.find((s) => s.id === activeSessionId);
   const activeAgentId = activeSession?.activeAgentId ?? null;
-  const activeAgent = agents.find((a) => a.agent_id === activeAgentId) ?? null;
+  const activeAgent = agents.find((a: any) => a.agent_id === activeAgentId) ?? null;
   const tokenUsage = activeSession?.tokenUsage;
 
   return (
@@ -224,6 +229,13 @@ export function InputArea() {
       )}
 
       <div className="flex items-end gap-2">
+        {/* Connecting banner */}
+        {connectionStatus !== 'connected' && (
+          <div className="absolute top-0 left-0 right-0 -translate-y-full bg-yellow-50 dark:bg-yellow-900/20 border-b border-yellow-200 dark:border-yellow-800 px-4 py-2 flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-yellow-400 animate-pulse"></span>
+            <span className="text-xs text-yellow-700 dark:text-yellow-300">Connecting to AI engine, please wait...</span>
+          </div>
+        )}
         {/* Text input */}
         <textarea
           ref={textareaRef}
@@ -253,7 +265,7 @@ export function InputArea() {
         ) : (
           <button
             onClick={handleSubmit}
-            disabled={!text.trim()}
+            disabled={!text.trim() || connectionStatus !== 'connected'}
             className="shrink-0 p-2 rounded-lg bg-blue-500 hover:bg-blue-600 disabled:bg-gray-300
               dark:disabled:bg-gray-600 text-white disabled:text-gray-500 dark:disabled:text-gray-400
               transition-colors disabled:cursor-not-allowed"
@@ -325,6 +337,30 @@ export function InputArea() {
           )}
         </div>
 
+        {/* Heartbeat manager button */}
+        <button
+          onClick={() => setShowHeartbeat(true)}
+          className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400 hover:text-red-500 dark:hover:text-red-400 transition-colors"
+          title="心跳任务管理"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
+          </svg>
+          <span>Heartbeat</span>
+        </button>
+
+        {/* Hook manager button */}
+        <button
+          onClick={() => setShowHooks(true)}
+          className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400 hover:text-purple-500 dark:hover:text-purple-400 transition-colors"
+          title="Hook 自动化管理"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+          </svg>
+          <span>Hooks</span>
+        </button>
+
         {/* New chat button */}
         <button
           onClick={() => {
@@ -372,6 +408,12 @@ export function InputArea() {
 
     {/* A2A Agent Manager Modal */}
     {showA2AManager && <A2AAgentManager onClose={() => setShowA2AManager(false)} />}
+
+    {/* Heartbeat Manager Modal */}
+    {showHeartbeat && <HeartbeatManager onClose={() => setShowHeartbeat(false)} />}
+
+    {/* Hook Manager Modal */}
+    {showHooks && <HookManager onClose={() => setShowHooks(false)} />}
   </>
   );
 }

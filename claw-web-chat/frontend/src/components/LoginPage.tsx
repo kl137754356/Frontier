@@ -73,18 +73,17 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
       localStorage.setItem('frontier_token_expires_at', String(Date.now() + expiresIn * 1000));
       localStorage.setItem('frontier_username', username.trim());
 
-      const ok = await aguiClient.sendConfig({
+      // Proceed to main UI immediately — don't wait for claw to initialize
+      onLoginSuccess();
+
+      // Start claw connection in background (non-blocking)
+      aguiClient.sendConfig({
         baseUrl: GATEWAY_URL,
         clawHost: '127.0.0.1',
         clawPort: 9527,
         model: DEFAULT_MODEL,
         apiKey: accessToken,
-      });
-
-      // Always proceed to main UI after successful auth.
-      // If sendConfig was rejected (another connection in progress), the App's
-      // auto-connect useEffect will handle reconnection after isLoggedIn flips.
-      onLoginSuccess();
+      }).catch(() => { /* App's auto-connect will retry */ });
     } catch (err: any) {
       setStatus('error');
       setErrorMsg(err.message || '网络错误，请检查连接后重试');

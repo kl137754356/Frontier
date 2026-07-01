@@ -71,6 +71,18 @@ export default defineConfig({
         target: 'http://localhost:8081',
         changeOrigin: true,
       },
+      '/sessions': {
+        target: 'http://localhost:8081',
+        changeOrigin: true,
+      },
+      '/cancel': {
+        target: 'http://localhost:8081',
+        changeOrigin: true,
+      },
+      '/restart': {
+        target: 'http://localhost:8081',
+        changeOrigin: true,
+      },
     },
   },
 });

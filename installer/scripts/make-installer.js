@@ -113,6 +113,13 @@ if (fs.existsSync(clawSettings)) {
   console.log('  Frontier settings reference copied');
 }
 
+// Copy hooks template
+const hooksTemplate = path.join(ROOT, 'hooks.template.json');
+if (fs.existsSync(hooksTemplate)) {
+  copyFile(hooksTemplate, path.join(RELEASE_DIR, 'hooks.template.json'));
+  console.log('  Hooks template copied');
+}
+
 // Step 2: Copy Node.js runtime (just node.exe)
 console.log('\n--- Step 2: Embed Node.js runtime ---');
 const nodeDestDir = path.join(RELEASE_DIR, 'node');
@@ -123,14 +130,36 @@ console.log(`  node.exe (${process.version}) embedded`);
 // Step 3: Create launcher scripts
 console.log('\n--- Step 3: Create launchers ---');
 
-const batchContent = '@echo off\r\ntitle Frontier\r\nset "APP_DIR=%~dp0"\r\nset "NODE=%APP_DIR%node\\\\node.exe"\r\n"%NODE%" "%APP_DIR%main.js"\r\n';
+const batchContent = [
+  '@echo off',
+  'title Frontier',
+  ':: Check for admin rights',
+  'net session >nul 2>&1',
+  'if %errorlevel% neq 0 (',
+  '    echo Requesting administrator privileges...',
+  '    powershell -Command "Start-Process \'%~f0\' -Verb RunAs"',
+  '    exit /b',
+  ')',
+  'set "APP_DIR=%~dp0"',
+  'set "NODE=%APP_DIR%node\\\\node.exe"',
+  '"%NODE%" "%APP_DIR%main.js"',
+  '',
+].join('\r\n');
 fs.writeFileSync(path.join(RELEASE_DIR, 'Frontier.bat'), batchContent);
-console.log('  Frontier.bat (console launcher)');
+console.log('  Frontier.bat (console launcher, admin)');
 
-// VBS for silent startup - no console window
-const vbsContent = 'Set WshShell = CreateObject("WScript.Shell")\r\nWshShell.CurrentDirectory = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)\r\nWshShell.Run """node\\node.exe"" ""main.js""", 0, False\r\n';
+// VBS for silent startup with admin elevation
+const vbsContent = [
+  'Set fso = CreateObject("Scripting.FileSystemObject")',
+  'Set WshShell = CreateObject("WScript.Shell")',
+  'appDir = fso.GetParentFolderName(WScript.ScriptFullName)',
+  "' Run as Administrator",
+  'Set objShell = CreateObject("Shell.Application")',
+  'objShell.ShellExecute appDir & "\\node\\node.exe", """" & appDir & "\\main.js""", appDir, "runas", 0',
+  '',
+].join('\r\n');
 fs.writeFileSync(path.join(RELEASE_DIR, 'Frontier.vbs'), vbsContent);
-console.log('  Frontier.vbs (silent launcher)');
+console.log('  Frontier.vbs (silent launcher, admin)');
 
 // Step 4: Summary
 console.log('\n--- Summary ---');

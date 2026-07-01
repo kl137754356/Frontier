@@ -74,6 +74,29 @@ function setupSkills() {
 }
 
 /**
+ * Set up hooks template — copies hooks.template.json to workspace .claw/hooks.json on first launch.
+ * Won't overwrite if file already exists (preserves user modifications).
+ */
+function setupHooksTemplate() {
+  const templateSrc = path.join(APP_DIR, 'hooks.template.json');
+  const targetPath = path.join(USER_DATA, '.claw', 'hooks.json');
+
+  if (!fs.existsSync(templateSrc)) {
+    log('No hooks template found, skipping');
+    return;
+  }
+
+  if (fs.existsSync(targetPath)) {
+    log('hooks.json already exists, skipping template copy');
+    return;
+  }
+
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+  fs.copyFileSync(templateSrc, targetPath);
+  log('Hooks template copied to ' + targetPath);
+}
+
+/**
  * Refresh skill files in workspace every launch.
  * Overwrites bundled skill files (.txt) to keep them current.
  * Also cleans up any leftover .md/.IPGSD from old format.
@@ -246,6 +269,8 @@ function setupLocalMcpServers() {
   const mcpDir = path.join(APP_DIR, 'mcp-servers');
   const settingsPath = path.join(USER_DATA, '.claw', 'settings.json');
 
+  // Only auto-configure if settings.json doesn't exist yet (first launch)
+  // After first launch, user owns settings.json — don't modify it
   if (!fs.existsSync(mcpDir) || !fs.existsSync(settingsPath)) return;
 
   const mcpMappings = [
@@ -504,6 +529,9 @@ async function main() {
   // Set up bundled skills (first launch only, won't overwrite user changes)
   setupSkills();
 
+  // Set up hooks template (first launch only, won't overwrite user changes)
+  setupHooksTemplate();
+
   // Refresh skill .md files — delete encrypted .IPGSD and rewrite clean plaintext.
   // Must run before claw.exe connects so files are readable.
   refreshSkillFiles();
@@ -514,48 +542,32 @@ async function main() {
   // Write/update CLAUDE.md with mandatory agent instructions (always overwrite to stay current)
   setupClaudeMd();
 
-  // Merge frontier-settings.json into .claw/settings.json on each launch.
-  // - If settings.json doesn't exist: copy template (with ${USER_HOME} substitution)
-  // - If settings.json exists: add only NEW mcpServers from template that aren't already configured
+  // Write .claw/settings.json ONLY if it doesn't exist (first launch).
+  // If it exists, never overwrite — user modifications are preserved.
   const clawSettingsSrc = path.join(APP_DIR, 'frontier-settings.json');
   const clawSettingsDst = path.join(USER_DATA, '.claw', 'settings.json');
+  let settingsIsNew = false;
   if (fs.existsSync(clawSettingsSrc)) {
     fs.mkdirSync(path.dirname(clawSettingsDst), { recursive: true });
-    const userHome = (process.env.USERPROFILE || process.env.HOME || '').replace(/\\/g, '\\\\');
-    let templateContent = fs.readFileSync(clawSettingsSrc, 'utf8');
-    templateContent = templateContent.replace(/\$\{USER_HOME\}/g, userHome);
-    const template = JSON.parse(templateContent);
 
     if (!fs.existsSync(clawSettingsDst)) {
       // First launch: write template as-is
+      const userHome = (process.env.USERPROFILE || process.env.HOME || '').replace(/\\/g, '\\\\');
+      let templateContent = fs.readFileSync(clawSettingsSrc, 'utf8');
+      templateContent = templateContent.replace(/\$\{USER_HOME\}/g, userHome);
+      const template = JSON.parse(templateContent);
       fs.writeFileSync(clawSettingsDst, JSON.stringify(template, null, 2), 'utf8');
       log(`Settings created: ${clawSettingsDst}`);
+      settingsIsNew = true;
     } else {
-      // Subsequent launches: merge new servers from template without overwriting user config
-      try {
-        const existing = JSON.parse(fs.readFileSync(clawSettingsDst, 'utf8'));
-        const existingServers = existing.mcpServers || {};
-        const templateServers = template.mcpServers || {};
-        let added = 0;
-        for (const [name, config] of Object.entries(templateServers)) {
-          if (!existingServers[name]) {
-            existingServers[name] = config;
-            added++;
-          }
-        }
-        if (added > 0) {
-          existing.mcpServers = existingServers;
-          fs.writeFileSync(clawSettingsDst, JSON.stringify(existing, null, 2), 'utf8');
-          log(`Settings updated: added ${added} new MCP server(s)`);
-        }
-      } catch (e) {
-        log(`Settings merge failed (keeping existing): ${e.message}`);
-      }
+      log(`Settings already exist, skipping (user modifications preserved)`);
     }
   }
 
-  // Auto-configure MCP servers found in mcp-servers/ directory
-  setupLocalMcpServers();
+  // Auto-configure MCP servers found in mcp-servers/ directory (only on first launch)
+  if (settingsIsNew) {
+    setupLocalMcpServers();
+  }
 
   startBackend();
 

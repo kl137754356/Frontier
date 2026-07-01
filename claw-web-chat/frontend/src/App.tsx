@@ -8,6 +8,9 @@ import { ChatArea } from './components/ChatArea';
 import { Notifications } from './components/Notifications';
 import { LoginPage } from './components/LoginPage';
 
+// Flag to prevent App.tsx auto-connect from firing after LoginPage already sent config
+let loginPageSentConfig = false;
+
 /** Returns true if the saved gateway token is still valid */
 function isTokenValid(): boolean {
   const expiresAt = localStorage.getItem('frontier_token_expires_at');
@@ -46,6 +49,16 @@ function App() {
     if (!isLoggedIn) { setTokenChecked(true); return; }
     const token = getSavedToken();
     if (!token) { setTokenChecked(true); return; }
+    // Skip server-side verification if token was just saved (within last 30s)
+    // This prevents the race condition where verify-token runs with a stale token right after login
+    const expiresAt = localStorage.getItem('frontier_token_expires_at');
+    if (expiresAt) {
+      const savedAt = Number(expiresAt) - 28800000; // expiresAt = savedAt + 8h
+      if (Date.now() - savedAt < 30000) {
+        setTokenChecked(true);
+        return;
+      }
+    }
     // Use the backend as a proxy to verify token validity
     fetch('/auth/verify-token', {
       method: 'POST',
@@ -133,6 +146,8 @@ function App() {
     const timer = setTimeout(async () => {
       // Don't auto-connect if showing login page
       if (!isLoggedIn) return;
+      // Don't auto-connect if LoginPage already sent config (avoid duplicate requests with different tokens)
+      if (loginPageSentConfig) { loginPageSentConfig = false; return; }
       const state = useChatStore.getState();
       if (state.connectionStatus === 'connected') return; // already connected
 
@@ -170,7 +185,7 @@ function App() {
           apiKey: profile.apiKey,
         });
       }
-    }, 2000);
+    }, 5000);
 
     return () => {
       clearTimeout(timer);
@@ -301,7 +316,7 @@ function App() {
     return <div className="h-screen flex items-center justify-center bg-white dark:bg-gray-900"><span className="text-gray-400">验证登录状态...</span></div>;
   }
   if (!isLoggedIn) {
-    return <LoginPage onLoginSuccess={() => { initSessionsFromBackend(); setIsLoggedIn(true); }} />;
+    return <LoginPage onLoginSuccess={() => { loginPageSentConfig = true; initSessionsFromBackend(); setTokenChecked(true); setIsLoggedIn(true); }} />;
   }
 
   return (

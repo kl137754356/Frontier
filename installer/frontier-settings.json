@@ -1,29 +1,13 @@
 {
   "mcpServers": {
     "filesystem": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-filesystem",
-        "${USER_HOME}"
-      ],
-      "_comment": "文件系统访问，默认允许访问用户主目录。如需限制范围，修改最后一个参数为具体路径"
-    },
-    "memory": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-memory"]
-    },
-    "sequential-thinking": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+      "command": "node",
+      "args": ["mcp-npm/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js", "${USER_HOME}"],
+      "_comment": "文件系统访问，默认允许访问用户主目录"
     },
     "fetch": {
-      "command": "npx",
-      "args": ["-y", "@kazuph/mcp-fetch"]
-    },
-    "time": {
-      "command": "npx",
-      "args": ["-y", "@theo.foobar/mcp-time"]
+      "command": "node",
+      "args": ["mcp-npm/node_modules/@kazuph/mcp-fetch/dist/index.js"]
     }
   }
 }

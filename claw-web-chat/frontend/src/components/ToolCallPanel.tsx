@@ -157,7 +157,8 @@ interface ToolCallItemProps {
 }
 
 function ToolCallItem({ name, input, output, isError }: ToolCallItemProps) {
-  const hasContent = !!(input || (output !== undefined && output !== ''));
+  // Can expand if there's any input OR the tool has finished (output is defined, even if empty)
+  const hasContent = !!(input || output !== undefined);
   // Always start collapsed - user can expand if interested
   const [collapsed, setCollapsed] = useState(true);
 
@@ -261,11 +262,11 @@ function ToolCallItem({ name, input, output, isError }: ToolCallItemProps) {
               </div>
             ) : (
               <div className="px-3 py-1.5">
-                <span className="text-xs text-green-500 dark:text-green-400 flex items-center gap-1">
+                <span className="text-xs text-gray-400 dark:text-gray-500 flex items-center gap-1">
                   <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                   </svg>
-                  Done (no output returned)
+                  完成（输出未通过协议回传，详见后台日志）
                 </span>
               </div>
             )

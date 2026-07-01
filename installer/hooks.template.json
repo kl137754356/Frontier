@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "hooks": [
+    {
+      "id": "example-run-complete-check",
+      "name": "AI 回复后检查状态",
+      "description": "每次 AI 回复完成后自动检查系统状态",
+      "event": "run-complete",
+      "eventConfig": {},
+      "action": "send-prompt",
+      "actionConfig": {
+        "prompt": "简要报告当前系统状态"
+      },
+      "enabled": false,
+      "createdAt": 1700000000000,
+      "updatedAt": 1700000000000
+    }
+  ]
+}

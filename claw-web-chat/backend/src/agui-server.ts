@@ -26,6 +26,9 @@ import {
   startTurn, recordToolStart, recordToolEnd, endTurn, endTurnWithError,
   isToolCallLogEnabled, setToolCallLogEnabled, toggleToolCallLog,
 } from './tool-call-logger.js';
+import { HookStore } from './hook-store.js';
+import { HookManager } from './hook-manager.js';
+import { HookExecutor } from './hook-executor.js';
 
 // --- Session turn tracking for telemetry ---
 const sessionTurnCounters: Map<string, number> = new Map();
@@ -79,6 +82,12 @@ const SKILLS_DIR = CLAW_WORKSPACE ? join(CLAW_WORKSPACE, '.claw', 'skills') : jo
 // Shared instances
 const tcpBridge = new TcpBridge();
 const clawProcess = new ClawProcess();
+
+// --- Hook Management ---
+const hookStore = new HookStore();
+const hookManager = new HookManager(hookStore);
+// HookExecutor sendPromptFn will be wired after heartbeatQueue is defined below
+let hookExecutor: HookExecutor;
 
 // Connection state
 let connectingInProgress = false;
@@ -162,6 +171,13 @@ function drainHeartbeatQueue(): void {
 function backgroundMessageHandler(msg: TcpServerMessage): void {
   handleHeartbeatTcpMsg(msg);
 }
+
+// Wire up HookExecutor now that heartbeatQueue and drainHeartbeatQueue are defined
+hookExecutor = new HookExecutor(hookManager, (prompt: string) => {
+  const virtualTask = { id: `hook-${Date.now()}`, prompt, intervalMs: 0, timer: null, createdAt: Date.now(), lastRun: null, runCount: 0, stopped: false, paused: false } as HeartbeatTask;
+  heartbeatQueue.push({ id: virtualTask.id, prompt, task: virtualTask });
+  drainHeartbeatQueue();
+});
 
 function pauseHeartbeatTask(id: string): boolean {
   const task = heartbeatTasks.get(id);
@@ -643,6 +659,7 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
   let a2uiAlreadyRendered = false; // Track if A2UI was rendered from tool_end
   const pendingToolIds: Set<string> = new Set(); // Track tool calls that haven't received tool_end
   const pendingToolNames: Map<string, string> = new Map(); // id -> name for logging
+  const pendingToolInputs: Map<string, string> = new Map(); // id -> input for hook context
 
   // --- Timing instrumentation ---
   const t0 = Date.now(); // Request start time
@@ -657,10 +674,10 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
     const drainStart = Date.now();
     await new Promise<void>((resolve) => {
       const checkInterval = setInterval(() => {
-        if (!previousRunDraining || Date.now() - drainStart > 45000) {
+        if (!previousRunDraining || Date.now() - drainStart > 12000) {
           clearInterval(checkInterval);
           if (previousRunDraining) {
-            console.log('[AgUiServer] Drain wait timeout (45s), proceeding anyway');
+            console.log('[AgUiServer] Drain wait timeout (12s), proceeding anyway');
             previousRunDraining = false;
           } else {
             console.log('[AgUiServer] Previous run finished, proceeding with new prompt');
@@ -822,28 +839,8 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
           sendSseEvent(res, { type: 'STEP_FINISHED', stepId: thinkingStepId });
           thinkingStepId = null;
         }
-        // Auto-close any pending tool calls that never received tool_end
-        // This happens when claw-code starts replying text without sending tool results
-        if (pendingToolIds.size > 0) {
-          console.log(`[AgUiServer] Auto-closing ${pendingToolIds.size} pending tool(s) — text chunk arrived before tool_end:`);
-          for (const toolId of pendingToolIds) {
-            const toolName = pendingToolNames.get(toolId) || 'unknown';
-            console.log(`[AgUiServer]   - ${toolName} (id=${toolId})`);
-            // Check if there's a captured MCP error for this tool
-            const shortName = toolName.split('__').pop() || toolName;
-            const mcpError = recentMcpErrors.get(shortName) || recentMcpErrors.get(toolName);
-            if (mcpError) {
-              console.log(`[AgUiServer]   Injecting MCP error for ${toolName}: ${mcpError.slice(0, 100)}`);
-              sendSseEvent(res, { type: 'TOOL_CALL_END', toolCallId: toolId, result: mcpError, isError: true });
-              recentMcpErrors.delete(shortName);
-              recentMcpErrors.delete(toolName);
-            } else {
-              sendSseEvent(res, { type: 'TOOL_CALL_END', toolCallId: toolId, result: '', isError: false });
-            }
-          }
-          pendingToolIds.clear();
-          pendingToolNames.clear();
-        }
+        // NOTE: Don't auto-close pending tools here — claw-code sends tool_end after run_turn completes
+        // but BEFORE the done message. Text chunks arriving before tool_end is normal streaming behavior.
         if (!textStarted) {
           if (!tFirstChunk) tFirstChunk = Date.now();
           sendSseEvent(res, { type: 'TEXT_MESSAGE_START', messageId, role: 'assistant' });
@@ -868,6 +865,7 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
         // Track this tool as pending
         pendingToolIds.add(msg.id);
         pendingToolNames.set(msg.id, msg.name);
+        pendingToolInputs.set(msg.id, msg.input || '');
         toolTimings.set(msg.id, { name: msg.name, start: Date.now() });
         sendSseEvent(res, { type: 'TOOL_CALL_START', toolCallId: msg.id, toolCallName: msg.name });
         if (msg.input) {
@@ -891,10 +889,19 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
         pendingToolNames.delete(msg.id);
         if (timing) timing.end = Date.now();
         const toolDuration = timing ? (timing.end! - timing.start) : 0;
-        console.log(`[AgUiServer] tool_end: ${timing?.name || 'unknown'} (id=${msg.id}) took ${toolDuration}ms, wasPending=${wasPending}, is_error=${msg.is_error}, output_len=${msg.output?.length || 0} [+${Date.now() - t0}ms]`);
+        console.log(`[AgUiServer] tool_end: ${timing?.name || 'unknown'} (id=${msg.id}) took ${toolDuration}ms, wasPending=${wasPending}, is_error=${msg.is_error}, output_type=${typeof msg.output}, output_len=${typeof msg.output === 'string' ? msg.output.length : JSON.stringify(msg.output)?.length || 0} [+${Date.now() - t0}ms]`);
 
         // If tool returned empty/null and we have a captured MCP error, inject it
-        let finalOutput = msg.output;
+        // Ensure output is always a string (claw-code may send object, array, null, or literal "None")
+        let finalOutput: string = '';
+        if (msg.output === null || msg.output === undefined) {
+          finalOutput = '';
+        } else if (typeof msg.output === 'string') {
+          finalOutput = (msg.output === 'None' || msg.output === 'null' || msg.output === 'undefined') ? '' : msg.output;
+        } else {
+          // Object/array — stringify it for display
+          finalOutput = JSON.stringify(msg.output, null, 2);
+        }
         let finalIsError = msg.is_error;
         if (!finalOutput || finalOutput.trim() === '') {
           const shortName = toolNameForError.split('__').pop() || toolNameForError;
@@ -909,6 +916,18 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
         }
 
         sendSseEvent(res, { type: 'TOOL_CALL_END', toolCallId: msg.id, result: finalOutput, isError: finalIsError });
+        console.log(`[AgUiServer] TOOL_CALL_END sent: id=${msg.id}, result_len=${finalOutput?.length || 0}, result_preview="${(finalOutput || '').slice(0, 100)}", raw_output_type=${typeof msg.output}, raw_output_is_null=${msg.output === null}`);
+
+        // --- Hook: fire tool-error event when tool returns error ---
+        if (finalIsError && finalOutput) {
+          const toolNameForHook = toolTimings.get(msg.id)?.name || 'unknown';
+          const toolInputForHook = pendingToolInputs.get(msg.id) || '';
+          hookExecutor.fire({
+            type: 'tool-error',
+            data: { toolName: toolNameForHook, toolInput: toolInputForHook, toolError: finalOutput }
+          });
+        }
+        pendingToolInputs.delete(msg.id);
 
         // --- Tool Call Logger ---
         recordToolEnd(currentRunId, msg.id, finalOutput || '', finalIsError);
@@ -987,6 +1006,9 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
 
         // --- Tool Call Logger: end turn with error ---
         endTurnWithError(currentRunId, msg.text);
+
+        // --- Hook: fire run-error event ---
+        hookExecutor.fire({ type: 'run-error', data: { error: msg.text } });
 
         // Auto-restart with latest token on 401 (token expired during MCP init)
         if (msg.text && (msg.text.includes('401') || msg.text.includes('Unauthorized') || msg.text.includes('Invalid token'))) {
@@ -1086,6 +1108,9 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
 
         // --- Tool Call Logger: end turn ---
         endTurn(currentRunId);
+
+        // --- Hook: fire run-complete event ---
+        hookExecutor.fire({ type: 'run-complete', data: { response: accumulatedText } });
 
         sendSseEvent(res, { type: 'RUN_FINISHED', runId: currentRunId });
 
@@ -1238,6 +1263,9 @@ async function handleAgentRun(req: IncomingMessage, res: ServerResponse): Promis
 
   console.log('[AgUiServer] Sending prompt to claw-code:', finalPrompt.slice(0, 100));
   tPromptSent = Date.now();
+
+  // --- Hook: fire prompt-submit event ---
+  hookExecutor.fire({ type: 'prompt-submit', data: { prompt: lastUserMsg.content } });
 
   // --- Tool Call Logger: start tracking this turn ---
   startTurn(currentRunId, threadId || '', finalPrompt);
@@ -1544,25 +1572,16 @@ async function handleCancel(req: IncomingMessage, res: ServerResponse): Promise<
     };
     tcpBridge.on('message', drainListener);
 
-    // Safety timeout: if claw doesn't finish in 30s, force restart
-    setTimeout(async () => {
+    // Safety timeout: if claw doesn't finish in 10s, clear drain flag so new messages can proceed
+    setTimeout(() => {
       if (previousRunDraining) {
-        console.log('[AgUiServer] Soft cancel drain timeout (30s) — force restarting claw');
+        console.log('[AgUiServer] Soft cancel drain timeout (10s) — clearing drain flag to unblock new messages');
         previousRunDraining = false;
-        const config = clawProcess.getConfig();
-        if (config) {
-          try {
-            tcpBridge.disconnect();
-            await clawProcess.stop();
-            await new Promise(r => setTimeout(r, 1000));
-            await clawProcess.start(config);
-            // TCP reconnect handled by the 'exit' handler auto-restart logic
-          } catch (err: any) {
-            console.warn('[AgUiServer] Force restart after cancel timeout failed:', err.message);
-          }
-        }
+        tcpBridge.removeAllListeners('message');
+        tcpBridge.on('message', backgroundMessageHandler);
+        drainHeartbeatQueue();
       }
-    }, 30000);
+    }, 10000);
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'cancelled' }));
@@ -1928,6 +1947,130 @@ async function restartClawAfterAgentChange(): Promise<boolean> {
   }
 }
 
+// --- Hook Management API ---
+async function handleHooks(req: IncomingMessage, res: ServerResponse) {
+  setCorsHeaders(res);
+  const url = req.url || '';
+  const method = req.method || 'GET';
+
+  // Handle OPTIONS preflight
+  if (method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  try {
+    // PATCH /hooks/{id}/toggle
+    const toggleMatch = url.match(/^\/hooks\/([^/]+)\/toggle$/);
+    if (toggleMatch && method === 'PATCH') {
+      const hookId = toggleMatch[1];
+      const body = await parseBody(req);
+      const result = hookManager.toggle(hookId, !!body.enabled);
+      if (!result.ok) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: result.error }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ hook: result.value }));
+      return;
+    }
+
+    // POST /hooks/{id}/trigger — manually trigger a hook
+    const triggerMatch = url.match(/^\/hooks\/([^/]+)\/trigger$/);
+    if (triggerMatch && method === 'POST') {
+      const hookId = triggerMatch[1];
+      const hook = hookManager.get(hookId);
+      if (!hook) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { code: 'NOT_FOUND', message: `Hook "${hookId}" not found` } }));
+        return;
+      }
+      // Manual trigger bypasses enabled check
+      hookExecutor.triggerManual(hookId);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'triggered', hook: { id: hook.id, name: hook.name } }));
+      return;
+    }
+
+    // GET/PUT/DELETE /hooks/{id}
+    const idMatch = url.match(/^\/hooks\/([^/]+)$/);
+    if (idMatch && idMatch[1] !== '') {
+      const hookId = idMatch[1];
+
+      if (method === 'GET') {
+        const hook = hookManager.get(hookId);
+        if (!hook) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { code: 'NOT_FOUND', message: `Hook "${hookId}" not found` } }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ hook }));
+        return;
+      }
+
+      if (method === 'PUT') {
+        const body = await parseBody(req);
+        const result = hookManager.update(hookId, body);
+        if (!result.ok) {
+          const status = result.error.code === 'NOT_FOUND' ? 404
+            : result.error.code === 'DUPLICATE_NAME' ? 409 : 400;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: result.error }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ hook: result.value }));
+        return;
+      }
+
+      if (method === 'DELETE') {
+        const result = hookManager.remove(hookId);
+        if (!result.ok) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: result.error }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok' }));
+        return;
+      }
+    }
+
+    // GET /hooks — list all
+    if (method === 'GET') {
+      const hooks = hookManager.list();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ hooks }));
+      return;
+    }
+
+    // POST /hooks — create
+    if (method === 'POST') {
+      const body = await parseBody(req);
+      const result = hookManager.create(body);
+      if (!result.ok) {
+        const status = result.error.code === 'DUPLICATE_NAME' ? 409 : 400;
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: result.error }));
+        return;
+      }
+      res.writeHead(201, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ hook: result.value }));
+      return;
+    }
+
+    res.writeHead(405, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { code: 'METHOD_NOT_ALLOWED', message: 'Method not allowed' } }));
+  } catch (err: any) {
+    console.error('[Hooks API] Error:', err.message);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { code: 'INTERNAL', message: 'Internal server error' } }));
+  }
+}
+
 async function handleA2AAgents(req: any, res: any) {
   setCorsHeaders(res);
   const url = req.url || '';
@@ -2233,6 +2376,9 @@ const server = createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ valid: true, reason: 'verification_failed' }));
       }
+    } else if (req.url?.startsWith('/hooks')) {
+      // --- Hook Management CRUD ---
+      await handleHooks(req, res);
     } else if (req.url === '/a2a-agents' || req.url?.startsWith('/a2a-agents?')) {
       // --- A2A Agent Registry CRUD ---
       await handleA2AAgents(req, res);
@@ -2293,6 +2439,8 @@ tcpBridge.on('connected', () => {
     tcpBridge.on('message', backgroundMessageHandler);
     drainHeartbeatQueue();
   }
+  // --- Hook: fire app-start event on connection ---
+  hookExecutor.fire({ type: 'app-start' });
 });
 tcpBridge.on('disconnected', () => {
   console.warn('[AgUiServer] TCP disconnected from claw-code');

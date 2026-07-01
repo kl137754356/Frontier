@@ -5,6 +5,7 @@
   "description": "Web chat interface for claw-code AI programming assistant",
   "scripts": {
     "dev": "concurrently -n backend,frontend -c green,cyan \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:admin": "powershell -Command \"Start-Process cmd -ArgumentList '/c cd /d %cd% && npm run dev' -Verb RunAs\"",
     "dev:frontend": "npm run dev --prefix frontend",
     "dev:backend": "npm run dev --prefix backend",
     "build:frontend": "npm run build --prefix frontend",

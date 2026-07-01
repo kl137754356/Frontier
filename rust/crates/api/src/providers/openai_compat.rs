@@ -1405,7 +1405,7 @@ fn normalize_response(
 }
 
 fn parse_tool_arguments(arguments: &str) -> Value {
-    serde_json::from_str(arguments).unwrap_or_else(|_| json!({ "raw": arguments }))
+    serde_json::from_str(arguments).unwrap_or_else(|_| if arguments.trim().is_empty() { serde_json::json!({}) } else { json!({ "raw": arguments }) })
 }
 
 fn next_sse_frame(buffer: &mut Vec<u8>) -> Option<String> {

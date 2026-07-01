@@ -14,7 +14,7 @@
 
 import { EventEmitter } from 'events';
 import * as net from 'net';
-import type { TcpClientMessage, TcpServerMessage } from '../../shared/protocol.js';
+import type { TcpClientMessage, TcpServerMessage, PromptMeta } from '../../shared/protocol.js';
 import { MessageParser } from './message-parser.js';
 
 const MAX_RECONNECT_ATTEMPTS = 3;
@@ -78,10 +78,14 @@ export class TcpBridge extends EventEmitter {
   }
 
   /**
-   * Send a prompt message to claw-code.
+   * Send a prompt message to claw-code, optionally with telemetry metadata.
    */
-  sendPrompt(text: string): void {
-    this.sendMessage({ type: 'prompt', text });
+  sendPrompt(text: string, meta?: PromptMeta): void {
+    if (meta) {
+      this.sendMessage({ type: 'prompt', text, meta });
+    } else {
+      this.sendMessage({ type: 'prompt', text });
+    }
   }
 
   /**

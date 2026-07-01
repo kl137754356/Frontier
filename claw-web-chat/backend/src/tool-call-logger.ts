@@ -126,7 +126,7 @@ export function startTurn(runId: string, sessionId: string, userMessage: string)
   const header = `【${truncate(userMessage, 80)} - Start】`;
   logLine('');
   logLine(`[ToolCallLogger] ${separator}`);
-  logLine(`[ToolCallLogger] ${header}`);
+  logLine(`\x1b[34m[ToolCallLogger] ${header}\x1b[0m`);
   logLine(`[ToolCallLogger]   Session: ${sessionId}`);
   logLine(`[ToolCallLogger]   RunId:   ${runId}`);
   logLine(`[ToolCallLogger]   Time:    ${new Date().toISOString()}`);
@@ -155,10 +155,10 @@ export function recordToolStart(runId: string, toolId: string, toolName: string,
 
   const divider = '─'.repeat(60);
   logLine(`[ToolCallLogger] ${divider}`);
-  logLine(`[ToolCallLogger] [Tool Call #${entry.index}] START`);
-  logLine(`[ToolCallLogger]   Name:    ${toolName}`);
+  logLine(`\x1b[33m[ToolCallLogger] [Tool Call #${entry.index}] START\x1b[0m`);
+  logLine(`\x1b[33m[ToolCallLogger]   Name:    ${toolName}\x1b[0m`);
   logLine(`[ToolCallLogger]   ID:      ${toolId}`);
-  logLine(`[ToolCallLogger]   Input:   ${formatPayload(input)}`);
+  logLine(`\x1b[36m[ToolCallLogger]   Input:   ${formatPayload(input)}\x1b[0m`);
 }
 
 /**
@@ -181,13 +181,13 @@ export function recordToolEnd(runId: string, toolId: string, output: string, isE
     entry.errorMessage = output;
   }
 
-  logLine(`[ToolCallLogger] [Tool Call #${entry.index}] END`);
+  logLine(`\x1b[32m[ToolCallLogger] [Tool Call #${entry.index}] END\x1b[0m`);
   logLine(`[ToolCallLogger]   Duration: ${entry.durationMs}ms`);
   logLine(`[ToolCallLogger]   IsError:  ${isError}`);
   if (isError) {
-    logLine(`[ToolCallLogger]   Error:    ${formatPayload(output)}`);
+    logLine(`\x1b[31m[ToolCallLogger]   Error:    ${formatPayload(output)}\x1b[0m`);
   } else {
-    logLine(`[ToolCallLogger]   Output:   ${formatPayload(output)}`);
+    logLine(`\x1b[32m[ToolCallLogger]   Output:   ${formatPayload(output)}\x1b[0m`);
   }
 
   // Extract and display MCP substeps (function calls within the tool)
