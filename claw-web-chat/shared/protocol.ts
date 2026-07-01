@@ -67,10 +67,21 @@ export interface WsServerMessage {
 // === TCP Protocol (Backend ↔ claw-code) ===
 
 /**
+ * Metadata attached to each prompt for telemetry/session tracking.
+ * Passed through TCP to claw-code, which injects these as HTTP headers to gateway.
+ */
+export interface PromptMeta {
+  session_id: string;   // Unique session identifier (= AG-UI threadId)
+  turn_id: string;      // Unique turn identifier (= runId)
+  turn_index: number;   // Turn sequence number within session (0-based)
+  terminal: string;     // Client type: 'web' | 'cli'
+}
+
+/**
  * TCP message sent from the backend to claw-code.
  */
 export type TcpClientMessage =
-  | { type: 'prompt'; text: string }
+  | { type: 'prompt'; text: string; meta?: PromptMeta }
   | { type: 'reset' }
   | { type: 'inject'; messages: { role: string; text: string }[] }
   | { type: 'exit' }

@@ -21,6 +21,7 @@ export interface Session {
   messageCount: number; // message count
   unread: boolean; // has unread messages
   tokenUsage: TokenUsage; // cumulative token usage
+  activeAgentId?: string | null; // currently active A2A agent
 }
 
 /**

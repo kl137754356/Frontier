@@ -122,6 +122,9 @@ pub struct AnthropicClient {
     session_tracer: Option<SessionTracer>,
     prompt_cache: Option<PromptCache>,
     last_prompt_cache_record: Arc<Mutex<Option<PromptCacheRecord>>>,
+    /// Dynamic extra headers injected into every outgoing request (e.g. telemetry headers).
+    /// Updated externally per-turn via `set_extra_headers`.
+    extra_headers: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 impl AnthropicClient {
@@ -138,6 +141,7 @@ impl AnthropicClient {
             session_tracer: None,
             prompt_cache: None,
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
+            extra_headers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -154,6 +158,7 @@ impl AnthropicClient {
             session_tracer: None,
             prompt_cache: None,
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
+            extra_headers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -239,6 +244,18 @@ impl AnthropicClient {
     pub fn with_prompt_cache(mut self, prompt_cache: PromptCache) -> Self {
         self.prompt_cache = Some(prompt_cache);
         self
+    }
+
+    /// Returns a shared handle to the extra headers storage.
+    /// The caller can update this between requests to inject per-turn headers.
+    #[must_use]
+    pub fn extra_headers_handle(&self) -> Arc<Mutex<Vec<(String, String)>>> {
+        Arc::clone(&self.extra_headers)
+    }
+
+    /// Replace the current set of extra headers (called per-turn from TCP serve loop).
+    pub fn set_extra_headers(&self, headers: Vec<(String, String)>) {
+        *self.extra_headers.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = headers;
     }
 
     #[must_use]
@@ -491,6 +508,14 @@ impl AnthropicClient {
             }
             request_builder = request_builder.header(header_name, header_value);
         }
+
+        // Inject dynamic extra headers (telemetry: X-Session-Id, X-Turn-Id, etc.)
+        if let Ok(headers) = self.extra_headers.lock() {
+            for (name, value) in headers.iter() {
+                request_builder = request_builder.header(name.as_str(), value.as_str());
+            }
+        }
+
         request_builder
     }
 

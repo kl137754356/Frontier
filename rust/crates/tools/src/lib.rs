@@ -1975,9 +1975,14 @@ fn run_remote_trigger(input: RemoteTriggerInput) -> Result<String, String> {
             let status = response.status().as_u16();
             let body = response.text().unwrap_or_default();
             let truncated_body = if body.len() > 8192 {
+                // Find safe char boundary at or before 8192 to avoid panic on multi-byte chars
+                let mut end = 8192;
+                while end > 0 && !body.is_char_boundary(end) {
+                    end -= 1;
+                }
                 format!(
                     "{}\n\n[response truncated — {} bytes total]",
-                    &body[..8192],
+                    &body[..end],
                     body.len()
                 )
             } else {
@@ -5140,7 +5145,12 @@ impl ToolExecutor for SubagentToolExecutor {
                 "tool `{tool_name}` is not enabled for this sub-agent"
             )));
         }
-        let value = serde_json::from_str(input)
+        // Normalize empty/missing tool input to empty JSON object
+        let normalized_input = match input.trim() {
+            "" => "{}",
+            s => s,
+        };
+        let value = serde_json::from_str(normalized_input)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
         execute_tool_with_enforcer(self.enforcer.as_ref(), tool_name, &value)
             .map_err(ToolError::new)
@@ -5178,7 +5188,7 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                         id: id.clone(),
                         name: name.clone(),
                         input: serde_json::from_str(input)
-                            .unwrap_or_else(|_| serde_json::json!({ "raw": input })),
+                            .unwrap_or_else(|_| if input.trim().is_empty() { serde_json::json!({}) } else { serde_json::json!({ "raw": input }) }),
                     },
                     ContentBlock::ToolResult {
                         tool_use_id,

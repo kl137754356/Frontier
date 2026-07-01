@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Frontier × A2A 协议集成架构</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-2: #1c2330;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --amber: #d29922;
+    --red: #f85149;
+    --purple: #bc8cff;
+    --cyan: #56d4dd;
+    --pink: #f778ba;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 32px 24px 80px;
+  }
+  .wrap { max-width: 1200px; margin: 0 auto; }
+  h1 { font-size: 26px; font-weight: 650; margin-bottom: 6px; }
+  h2 {
+    font-size: 18px; font-weight: 600; margin: 48px 0 16px;
+    padding-bottom: 8px; border-bottom: 1px solid var(--border);
+  }
+  .subtitle { color: var(--muted); font-size: 14px; margin-bottom: 12px; }
+  .badge {
+    display: inline-block; font-size: 11px; padding: 2px 10px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--muted); margin-right: 6px;
+  }
+
+  /* Architecture diagram */
+  .arch {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 28px 24px; display: flex; flex-direction: column; gap: 18px;
+  }
+  .layer {
+    border: 1px dashed var(--border); border-radius: 10px;
+    padding: 16px 18px 18px; position: relative;
+  }
+  .layer-label {
+    position: absolute; top: -10px; left: 16px;
+    background: var(--panel); padding: 0 8px;
+    font-size: 12px; color: var(--muted); letter-spacing: .5px;
+  }
+  .row { display: flex; gap: 14px; flex-wrap: wrap; justify-content: center; }
+  .node {
+    flex: 1 1 180px; min-width: 170px; max-width: 300px;
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-left-width: 4px; border-radius: 8px; padding: 12px 14px;
+  }
+  .node h3 { margin: 0 0 4px; font-size: 14px; }
+  .node p { margin: 0; font-size: 12px; color: var(--muted); }
+  .node .tag { font-size: 10px; color: var(--muted); display: block; margin-top: 6px; opacity: .8; }
+  .n-ui { border-left-color: var(--cyan); }
+  .n-backend { border-left-color: var(--green); }
+  .n-claw { border-left-color: var(--accent); }
+  .n-a2a { border-left-color: var(--purple); }
+  .n-ext { border-left-color: var(--pink); }
+  .n-mcp { border-left-color: var(--amber); }
+  .n-hw { border-left-color: var(--red); }
+
+  .arrow {
+    text-align: center; color: var(--muted); font-size: 12px; position: relative;
+  }
+  .arrow span {
+    background: var(--panel); padding: 0 12px; position: relative; z-index: 1;
+  }
+  .arrow::before {
+    content: ""; position: absolute; left: 0; right: 0; top: 50%;
+    border-top: 1px solid var(--border);
+  }
+
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 14px; font-size: 11px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+
+  /* A2A Protocol diagram */
+  .proto-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .proto-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px;
+  }
+  .proto-card h3 { font-size: 14px; margin-bottom: 8px; }
+  .proto-card ul { margin: 0; padding-left: 16px; font-size: 12px; color: var(--muted); }
+  .proto-card li { margin: 3px 0; }
+
+  /* Flow */
+  .flow { display: flex; flex-direction: column; gap: 0; }
+  .step { display: flex; gap: 12px; align-items: flex-start; padding: 12px 0; }
+  .step .idx {
+    flex: 0 0 28px; height: 28px; border-radius: 50%;
+    background: var(--panel-2); border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 600; color: var(--accent);
+  }
+  .step .body { flex: 1; }
+  .step .body strong { font-size: 13px; }
+  .step .body p { margin: 3px 0 0; font-size: 12px; color: var(--muted); }
+  .connector { margin-left: 14px; border-left: 1px dashed var(--border); height: 10px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; }
+  td code { background: var(--panel-2); padding: 1px 5px; border-radius: 3px; font-size: 11px; }
+  .foot { margin-top: 40px; color: var(--muted); font-size: 11px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Frontier × A2A 协议集成架构</h1>
+  <p class="subtitle">展示 A2A 协议如何嵌入 Frontier 桌面应用，实现 claw.exe 与外部 Agent 的互操作。</p>
+  <div>
+    <span class="badge">A2A = Agent 间 JSON-RPC 协作</span>
+    <span class="badge">MCP = Agent 调工具（stdio）</span>
+    <span class="badge">AG-UI = 前端 SSE 事件流</span>
+  </div>
+
+  <!-- ============ 整体架构 ============ -->
+  <h2>① Frontier 整体架构（含 A2A 集成）</h2>
+  <div class="arch">
+
+    <div class="layer">
+      <span class="layer-label">用户层 — 浏览器</span>
+      <div class="row">
+        <div class="node n-ui">
+          <h3>🖥 Web Chat 前端</h3>
+          <p>React + Zustand · AG-UI SSE 流 · A2UI 选择组件</p>
+          <span class="tag">localhost:3000 → Vite proxy → 8081</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow"><span>AG-UI SSE（tool_start / tool_end / text_message）↕</span></div>
+
+    <div class="layer">
+      <span class="layer-label">后端桥接层 — agui-server.ts</span>
+      <div class="row">
+        <div class="node n-backend">
+          <h3>🌉 AG-UI Server</h3>
+          <p>HTTP/SSE 服务 · TCP→SSE 事件转换 · 不触碰 AI 逻辑</p>
+          <span class="tag">端口 8081 · 新增: /auth 代理 + /api/v1/proxy/agent 外部代理</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow"><span>TCP 9527（Content-Length 帧）↕</span></div>
+
+    <div class="layer">
+      <span class="layer-label">Agent 核心 — claw.exe (Rust)</span>
+      <div class="row">
+        <div class="node n-claw">
+          <h3>🧠 LLM + Function Calling</h3>
+          <p>模型推理 · 工具选择 · 对话循环</p>
+          <span class="tag">GlobalToolRegistry: 内置 + MCP + A2A handoff</span>
+        </div>
+        <div class="node n-a2a">
+          <h3>🔌 A2A 模块 (新增)</h3>
+          <p>config.rs · client.rs · tools.rs · delegate.rs</p>
+          <span class="tag">启动时加载 .claw/a2a-agents.json · 注册 handoff 工具</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow"><span>A2A: HTTP JSON-RPC ↔ · MCP: stdio Content-Length ↓</span></div>
+
+    <div class="layer">
+      <span class="layer-label">远程 Agent / 工具层</span>
+      <div class="row">
+        <div class="node n-a2a">
+          <h3>🌐 原生 A2A Agent</h3>
+          <p>Agent Card 发现 · JSON-RPC message/send · 流式进度</p>
+          <span class="tag">如: Weather Agent (localhost:4000)</span>
+        </div>
+        <div class="node n-ext">
+          <h3>🔗 外部 Agent (FastGPT/Dify)</h3>
+          <p>经后端代理 · OpenAI 兼容格式 · API Key 隔离</p>
+          <span class="tag">经 /api/v1/proxy/agent/{id}/chat</span>
+        </div>
+        <div class="node n-mcp">
+          <h3>⚙ MCP Server</h3>
+          <p>PC-DMIS COM · Metrology AI · 文件系统</p>
+          <span class="tag">stdio Content-Length 帧 · 现有不变</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="legend">
+      <span><i class="dot" style="background:var(--cyan)"></i>前端 UI</span>
+      <span><i class="dot" style="background:var(--green)"></i>后端桥接</span>
+      <span><i class="dot" style="background:var(--accent)"></i>Agent 核心</span>
+      <span><i class="dot" style="background:var(--purple)"></i>A2A 协议</span>
+      <span><i class="dot" style="background:var(--pink)"></i>外部平台</span>
+      <span><i class="dot" style="background:var(--amber)"></i>MCP 工具</span>
+    </div>
+  </div>
+
+  <!-- ============ A2A 协议框架 ============ -->
+  <h2>② A2A 协议框架</h2>
+  <div class="proto-grid">
+    <div class="proto-card">
+      <h3>📋 Agent Card（能力发现）</h3>
+      <ul>
+        <li>每个 A2A Agent 发布 <code>/.well-known/agent-card.json</code></li>
+        <li>描述: name, description, skills[]</li>
+        <li>claw 启动时 GET 拉取一次并缓存</li>
+        <li>用于生成 function calling 工具定义</li>
+      </ul>
+    </div>
+    <div class="proto-card">
+      <h3>📨 Task（任务委派）</h3>
+      <ul>
+        <li>Client 向 Server POST <code>/a2a/jsonrpc</code></li>
+        <li>方法: <code>message/send</code></li>
+        <li>参数: 自然语言任务描述</li>
+        <li>支持 webhook 推送通知</li>
+      </ul>
+    </div>
+    <div class="proto-card">
+      <h3>📊 Task Progress（进度追踪）</h3>
+      <ul>
+        <li>状态链: submitted → working → completed</li>
+        <li>流式事件: task / status-update / artifact-update</li>
+        <li>最终结果通过 artifact 或 status message 返回</li>
+        <li>格式化为工具输出展示给用户</li>
+      </ul>
+    </div>
+    <div class="proto-card">
+      <h3>🛡 零副作用保证</h3>
+      <ul>
+        <li>配置缺失 → 跳过，无工具注册</li>
+        <li>agents 为空 → 同上</li>
+        <li>全部不可达 + failFast=false → 同上</li>
+        <li>MCP / 前端 / agui-server 逻辑完全不变</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ============ 数据流 ============ -->
+  <h2>③ A2A 调用数据流</h2>
+  <div class="arch">
+    <div class="flow">
+      <div class="step">
+        <div class="idx">1</div>
+        <div class="body">
+          <strong>启动加载</strong>
+          <p>claw.exe 读取 <code>.claw/a2a-agents.json</code>，并行拉取所有 Agent Card，缓存到内存。</p>
+        </div>
+      </div>
+      <div class="connector"></div>
+      <div class="step">
+        <div class="idx">2</div>
+        <div class="body">
+          <strong>工具注册</strong>
+          <p>为每个可达的 Agent 生成 RuntimeToolDefinition（如 <code>weather_agent</code>），追加到 GlobalToolRegistry。</p>
+        </div>
+      </div>
+      <div class="connector"></div>
+      <div class="step">
+        <div class="idx">3</div>
+        <div class="body">
+          <strong>LLM 选择工具</strong>
+          <p>用户提问 → LLM 推理 → 决定调用 <code>weather_agent</code> 工具，参数: <code>{"task": "查询东京天气"}</code>。</p>
+        </div>
+      </div>
+      <div class="connector"></div>
+      <div class="step">
+        <div class="idx">4</div>
+        <div class="body">
+          <strong>任务委派</strong>
+          <p>claw 向远程 Agent POST JSON-RPC <code>message/send</code>，携带任务文本。监听流式进度事件。</p>
+        </div>
+      </div>
+      <div class="connector"></div>
+      <div class="step">
+        <div class="idx">5</div>
+        <div class="body">
+          <strong>结果返回</strong>
+          <p>格式化为 <code>[Weather Agent] Task abc: submitted → working → completed\nResult: 东京晴天 25°C</code>，经 TCP → SSE 展示给用户。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ Rust 模块结构 ============ -->
+  <h2>④ Rust 模块结构</h2>
+  <table>
+    <tr><th>模块</th><th>文件</th><th>职责</th></tr>
+    <tr><td>a2a::config</td><td><code>src/a2a/config.rs</code></td><td>解析 a2a-agents.json、路径优先级、is_enabled()</td></tr>
+    <tr><td>a2a::client</td><td><code>src/a2a/client.rs</code></td><td>HTTP GET Agent Card、超时、failFast 容错</td></tr>
+    <tr><td>a2a::tools</td><td><code>src/a2a/tools.rs</code></td><td>工具定义生成（snake_case 名 + schema）、system prompt supplement</td></tr>
+    <tr><td>a2a::delegate</td><td><code>src/a2a/delegate.rs</code></td><td>JSON-RPC 请求、流式事件解析、TaskProgress、format_tool_output</td></tr>
+    <tr><td>a2a::mod</td><td><code>src/a2a/mod.rs</code></td><td>全局 client 注册表、is_a2a_tool()、execute_a2a_tool()</td></tr>
+    <tr><td>external::config</td><td><code>src/external/config.rs</code></td><td>解析 external-agents.json、api_key 安全拒绝</td></tr>
+    <tr><td>external::adapter</td><td><code>src/external/adapter.rs</code></td><td>代理 POST 请求到后端 /api/v1/proxy/agent/{id}/chat</td></tr>
+  </table>
+
+  <!-- ============ 集成挂点 ============ -->
+  <h2>⑤ 四个集成挂点（main.rs）</h2>
+  <table>
+    <tr><th>挂点</th><th>位置</th><th>行为</th></tr>
+    <tr><td>① 配置加载</td><td>MCP 工具加载之后</td><td>读 a2a-agents.json + external-agents.json</td></tr>
+    <tr><td>② 工具合并</td><td>GlobalToolRegistry 构建前</td><td>拉 Agent Card → 生成 handoff tools → 追加到 runtime_tools</td></tr>
+    <tr><td>③ 执行分发</td><td>execute_runtime_tool()</td><td>识别 A2A/外部工具名 → 调 delegate_task / call_external_agent</td></tr>
+    <tr><td>④ 结果返回</td><td>tool 返回值</td><td>格式化进度链 + 结果 → 经 TCP→SSE 展示</td></tr>
+  </table>
+
+  <!-- ============ 配置文件 ============ -->
+  <h2>⑥ 配置文件</h2>
+  <div class="proto-grid">
+    <div class="proto-card">
+      <h3>📁 .claw/a2a-agents.json</h3>
+      <ul>
+        <li><code>agents[]</code>: id, type:"native", url, enabled</li>
+        <li><code>webhook</code>: enabled, url, token</li>
+        <li><code>options</code>: connectTimeoutMs, failFast</li>
+        <li>缺失时完全跳过（零副作用）</li>
+      </ul>
+    </div>
+    <div class="proto-card">
+      <h3>📁 .claw/external-agents.json</h3>
+      <ul>
+        <li><code>proxyBaseUrl</code>: 后端代理地址</li>
+        <li><code>agents[]</code>: id, type:"openai_compatible", name, description</li>
+        <li>无 api_key（安全隔离）</li>
+        <li>含 api_key 字段则拒绝加载</li>
+      </ul>
+    </div>
+  </div>
+
+  <p class="foot">Frontier A2A 集成架构文档 · 2026-06</p>
+</div>
+</body>
+</html>

@@ -81,6 +81,13 @@
     "time": {
       "command": "npx",
       "args": ["-y", "@theo.foobar/mcp-time"]
+    },
+    "a2a": {
+      "command": "node",
+      "args": ["claw-web-chat/a2a-mcp-bridge/bridge.js"],
+      "env": {
+        "A2A_CONFIG_PATH": ".claw/a2a-agents.json"
+      }
     }
   }
 }

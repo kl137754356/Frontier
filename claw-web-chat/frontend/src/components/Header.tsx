@@ -1,5 +1,6 @@
 import { useChatStore } from '../store/chat-store';
 import { sendConnectConfig } from '../services/ws-client';
+import { useState, useEffect } from 'react';
 
 interface HeaderProps {
   onToggleSidebar: () => void;
@@ -12,6 +13,36 @@ export function Header({ onToggleSidebar, sidebarCollapsed, onLogout }: HeaderPr
   const currentModel = useChatStore((s) => s.currentModel);
   const theme = useChatStore((s) => s.config.theme);
   const updateConfig = useChatStore((s) => s.updateConfig);
+
+  // Tool call log toggle state
+  const [toolLogEnabled, setToolLogEnabled] = useState(false);
+  const [toolLogLoading, setToolLogLoading] = useState(false);
+
+  // Fetch initial status on mount
+  useEffect(() => {
+    fetch('/tool-log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'status' }),
+    })
+      .then(res => res.json())
+      .then(data => setToolLogEnabled(data.enabled))
+      .catch(() => {});
+  }, []);
+
+  const handleToggleToolLog = async () => {
+    setToolLogLoading(true);
+    try {
+      const res = await fetch('/tool-log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'toggle' }),
+      });
+      const data = await res.json();
+      setToolLogEnabled(data.enabled);
+    } catch {}
+    setToolLogLoading(false);
+  };
 
   const toggleTheme = () => {
     const newTheme = theme === 'dark' ? 'light' : 'dark';
@@ -29,7 +60,7 @@ export function Header({ onToggleSidebar, sidebarCollapsed, onLogout }: HeaderPr
       {/* Title */}
       <div className="flex items-center gap-2">
         <span className="text-ui font-semibold text-gray-800 dark:text-gray-100">
-          Frontier
+          Hex.Frontier
         </span>
       </div>
 
@@ -38,9 +69,6 @@ export function Header({ onToggleSidebar, sidebarCollapsed, onLogout }: HeaderPr
 
       {/* Right section: ConnectionStatus + Model + ThemeToggle + SettingsButton */}
       <div className="flex items-center gap-2">
-        {/* Connection status */}
-        <ConnectionIndicator status={connectionStatus} />
-
         {/* Logged-in username */}
         {connectionStatus === 'connected' && (
           (() => {
@@ -52,6 +80,27 @@ export function Header({ onToggleSidebar, sidebarCollapsed, onLogout }: HeaderPr
             ) : null;
           })()
         )}
+
+        {/* Connection status */}
+        <ConnectionIndicator status={connectionStatus} />
+
+        {/* Tool Call Log toggle */}
+        <button
+          onClick={handleToggleToolLog}
+          disabled={toolLogLoading}
+          className={`p-1.5 rounded transition-colors ${
+            toolLogEnabled
+              ? 'bg-blue-100 dark:bg-blue-900 text-blue-600 dark:text-blue-300 hover:bg-blue-200 dark:hover:bg-blue-800'
+              : 'hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-400 dark:text-gray-500'
+          }`}
+          aria-label={toolLogEnabled ? '关闭工具日志' : '开启工具日志'}
+          title={toolLogEnabled ? 'Tool Log: ON (点击关闭)' : 'Tool Log: OFF (点击开启)'}
+        >
+          {/* Terminal/log icon */}
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+          </svg>
+        </button>
 
         {/* Theme toggle */}
         <button

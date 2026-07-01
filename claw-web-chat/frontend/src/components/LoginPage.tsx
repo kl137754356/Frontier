@@ -29,7 +29,7 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
     setErrorMsg('');
 
     try {
-      const res = await fetch(`${GATEWAY_URL}/auth/cli-login`, {
+      const res = await fetch(`/auth/cli-login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ method: 'password', username: username.trim(), password }),
@@ -40,7 +40,7 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
       // Gateway may return HTTP 200 with success:false for login failures
       if (!res.ok || data.success === false || !data.access_token) {
         setStatus('error');
-        setErrorMsg(data.detail || data.message || '用户名或密码错误');
+        setErrorMsg(data.detail || data.message || `登录失败 (HTTP ${res.status})`);
         return;
       }
 
@@ -73,20 +73,17 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
       localStorage.setItem('frontier_token_expires_at', String(Date.now() + expiresIn * 1000));
       localStorage.setItem('frontier_username', username.trim());
 
-      const ok = await aguiClient.sendConfig({
+      // Proceed to main UI immediately — don't wait for claw to initialize
+      onLoginSuccess();
+
+      // Start claw connection in background (non-blocking)
+      aguiClient.sendConfig({
         baseUrl: GATEWAY_URL,
         clawHost: '127.0.0.1',
         clawPort: 9527,
         model: DEFAULT_MODEL,
         apiKey: accessToken,
-      });
-
-      if (ok) {
-        onLoginSuccess();
-      } else {
-        setStatus('error');
-        setErrorMsg('登录成功但无法启动 AI 引擎，请检查日志或重试');
-      }
+      }).catch(() => { /* App's auto-connect will retry */ });
     } catch (err: any) {
       setStatus('error');
       setErrorMsg(err.message || '网络错误，请检查连接后重试');
@@ -133,12 +130,8 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
       <div className="relative w-full max-w-sm">
         {/* Brand */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-blue-600 shadow-lg shadow-blue-600/30 mb-4">
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
-            </svg>
-          </div>
-          <h1 className={`text-2xl font-bold tracking-tight ${titleColor}`}>Frontier</h1>
+          <img src="/Hexagon.jpg" alt="Hex.Frontier" className="w-16 h-16 mx-auto rounded-2xl shadow-lg shadow-blue-600/30 mb-4 object-cover" />
+          <h1 className={`text-2xl font-bold tracking-tight ${titleColor}`}>Hex.Frontier</h1>
           <p className={`text-sm mt-1 ${subtitleColor}`}>您的 AI 助手，登录后即可使用</p>
         </div>
 
@@ -233,7 +226,7 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
         </div>
 
         <p className={`text-center text-xs mt-6 ${footerColor}`}>
-          Frontier · Powered by Hexagon AI
+          Hex.Frontier · Powered by Hexagon AI
         </p>
       </div>
     </div>

@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { useChatStore } from './store/chat-store';
+import { useChatStore, initSessionsFromBackend } from './store/chat-store';
 import { wsClient, sendConnectConfig } from './services/ws-client';
 import { checkAndSendStartupMessage } from './services/agui-client';
 import { Header } from './components/Header';
@@ -7,6 +7,9 @@ import { SessionSidebar } from './components/SessionSidebar';
 import { ChatArea } from './components/ChatArea';
 import { Notifications } from './components/Notifications';
 import { LoginPage } from './components/LoginPage';
+
+// Flag to prevent App.tsx auto-connect from firing after LoginPage already sent config
+let loginPageSentConfig = false;
 
 /** Returns true if the saved gateway token is still valid */
 function isTokenValid(): boolean {
@@ -39,6 +42,42 @@ function App() {
 
   // Login gate: show LoginPage until we have a valid token
   const [isLoggedIn, setIsLoggedIn] = useState(() => getSavedToken() !== null);
+  const [tokenChecked, setTokenChecked] = useState(false);
+
+  // On mount: verify saved token is still valid with the gateway
+  useEffect(() => {
+    if (!isLoggedIn) { setTokenChecked(true); return; }
+    const token = getSavedToken();
+    if (!token) { setTokenChecked(true); return; }
+    // Skip server-side verification if token was just saved (within last 30s)
+    // This prevents the race condition where verify-token runs with a stale token right after login
+    const expiresAt = localStorage.getItem('frontier_token_expires_at');
+    if (expiresAt) {
+      const savedAt = Number(expiresAt) - 28800000; // expiresAt = savedAt + 8h
+      if (Date.now() - savedAt < 30000) {
+        setTokenChecked(true);
+        return;
+      }
+    }
+    // Use the backend as a proxy to verify token validity
+    fetch('/auth/verify-token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+      signal: AbortSignal.timeout(5000),
+    })
+      .then(res => res.json())
+      .then(data => {
+        if (data.valid === false) {
+          // Token expired on server side — force re-login
+          localStorage.removeItem('frontier_token_expires_at');
+          localStorage.removeItem('frontier_username');
+          setIsLoggedIn(false);
+        }
+      })
+      .catch(() => { /* Network error: proceed optimistically */ })
+      .finally(() => setTokenChecked(true));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleLogout = useCallback(() => {
     // Clear gateway token and profile — no need to explicitly reset backend,
@@ -64,6 +103,13 @@ function App() {
     }
   }, [theme]);
 
+  // Load sessions from backend on mount if already logged in
+  useEffect(() => {
+    if (isLoggedIn) {
+      initSessionsFromBackend();
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Responsive: auto-collapse sidebar below 768px
   useEffect(() => {
     const handleResize = () => {
@@ -86,8 +132,9 @@ function App() {
 
     // Auto-connect when WebSocket becomes ready
     const unsubscribe = useChatStore.subscribe((state, prevState) => {
-      // When connection succeeds, check for pending startup message
+      // When connection succeeds (reconnect after claw restart), stay on current session
       if (state.connectionStatus === 'connected' && prevState.connectionStatus !== 'connected') {
+        // Just stay on the current session — inject will handle context continuity
         if (state.activeSessionId) {
           checkAndSendStartupMessage(state.activeSessionId);
         }
@@ -99,6 +146,8 @@ function App() {
     const timer = setTimeout(async () => {
       // Don't auto-connect if showing login page
       if (!isLoggedIn) return;
+      // Don't auto-connect if LoginPage already sent config (avoid duplicate requests with different tokens)
+      if (loginPageSentConfig) { loginPageSentConfig = false; return; }
       const state = useChatStore.getState();
       if (state.connectionStatus === 'connected') return; // already connected
 
@@ -107,7 +156,7 @@ function App() {
         const healthRes = await fetch('/health', { signal: AbortSignal.timeout(3000) });
         if (healthRes.ok) {
           const health = await healthRes.json();
-          if (health.tcp && health.clawRunning) {
+          if (health.tcp && health.clawRunning && health.clawReady) {
             // Backend is already connected to claw-code — mark as connected
             useChatStore.getState().setConnectionStatus('connected');
             return;
@@ -136,7 +185,7 @@ function App() {
           apiKey: profile.apiKey,
         });
       }
-    }, 2000);
+    }, 5000);
 
     return () => {
       clearTimeout(timer);
@@ -157,11 +206,31 @@ function App() {
         const res = await fetch('/health', { signal: AbortSignal.timeout(3000) });
         if (res.ok) {
           consecutiveFailures = 0;
+
+          // Check if this session has been kicked (another browser logged in with different token)
+          const healthData = await res.json();
+          if (healthData.activeTokenHash) {
+            const kickCheckState = useChatStore.getState();
+            const profile = kickCheckState.config.profiles.find((p: any) => p.id === 'gateway');
+            if (profile?.apiKey) {
+              const myHash = profile.apiKey.slice(0, 8) + profile.apiKey.slice(-4);
+              if (myHash !== healthData.activeTokenHash) {
+                // Token mismatch — this session has been superseded by a new login
+                console.warn('[App] Session kicked: active token changed (another login detected)');
+                handleLogout();
+                return;
+              }
+            }
+          }
+
           // If we were disconnected but backend is now up, auto-reconnect
           const state = useChatStore.getState();
           if (state.connectionStatus === 'disconnected') {
-            const profile = state.config.profiles.find((p) => p.id === state.config.activeProfile);
-            if (profile?.apiKey) {
+            // Only auto-reconnect with the 'gateway' profile (official login)
+            // to avoid accidentally switching to a stale/different provider profile
+            const profile = state.config.profiles.find((p) => p.id === 'gateway')
+              || state.config.profiles.find((p) => p.id === state.config.activeProfile);
+            if (profile?.apiKey && profile.baseUrl?.includes('frontier.hexai.top')) {
               reconnecting = true;
               state.setConnectionStatus('reconnecting');
               const { aguiClient } = await import('./services/agui-client');
@@ -243,8 +312,11 @@ function App() {
   }, [sidebarCollapsed, updateConfig]);
 
   // Show login page if not authenticated
+  if (!tokenChecked) {
+    return <div className="h-screen flex items-center justify-center bg-white dark:bg-gray-900"><span className="text-gray-400">验证登录状态...</span></div>;
+  }
   if (!isLoggedIn) {
-    return <LoginPage onLoginSuccess={() => setIsLoggedIn(true)} />;
+    return <LoginPage onLoginSuccess={() => { loginPageSentConfig = true; initSessionsFromBackend(); setTokenChecked(true); setIsLoggedIn(true); }} />;
   }
 
   return (

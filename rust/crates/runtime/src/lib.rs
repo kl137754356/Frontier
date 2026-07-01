@@ -52,6 +52,8 @@ pub mod team_cron_registry;
 mod trust_resolver;
 mod usage;
 pub mod worker_boot;
+pub mod a2a;
+pub mod external;
 
 pub use approval_tokens::{
     ApprovalDelegationHop, ApprovalScope, ApprovalTokenAudit, ApprovalTokenError,

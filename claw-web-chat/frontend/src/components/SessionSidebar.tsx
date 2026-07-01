@@ -92,21 +92,6 @@ export function SessionSidebar() {
 
   return (
     <div className="h-full flex flex-col bg-gray-50 dark:bg-gray-900 border-r border-gray-200 dark:border-gray-700">
-      {/* New session button */}
-      <div className="p-2 border-b border-gray-200 dark:border-gray-700">
-        <button
-          onClick={handleNewSession}
-          className="w-full flex items-center justify-center gap-1 px-3 py-1.5 text-ui font-medium rounded
-            bg-blue-500 hover:bg-blue-600 text-white transition-colors"
-          aria-label="New session"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
-          </svg>
-          New Chat
-        </button>
-      </div>
-
       {/* Session list */}
       <div className="flex-1 overflow-y-auto">
         {sortedSessions.map((session) => (

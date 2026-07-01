@@ -14,11 +14,14 @@ export function DebugPanel() {
   if (!debugMode) return null;
 
   const typeColor = (type: string) => {
-    if (type === 'PROMPT_SENT') return 'text-blue-400';
-    if (type.startsWith('TOOL_CALL')) return 'text-yellow-400';
+    if (type === 'PROMPT_SENT') return 'text-blue-400';          // 用户输入
+    if (type === 'TOOL_CALL_START') return 'text-orange-400';    // 工具调用发送
+    if (type === 'TOOL_CALL_ARGS') return 'text-yellow-400';     // 工具调用参数
+    if (type === 'TOOL_CALL_END') return 'text-cyan-400';        // 工具调用返回
     if (type.startsWith('CUSTOM:')) return 'text-purple-400';
-    if (type === 'TEXT_MESSAGE_CONTENT') return 'text-green-400';
+    if (type === 'TEXT_MESSAGE_CONTENT') return 'text-green-400'; // 模型输出
     if (type === 'RUN_ERROR') return 'text-red-400';
+    if (type === 'RUN_STARTED' || type === 'RUN_FINISHED') return 'text-gray-500';
     return 'text-gray-400';
   };
 

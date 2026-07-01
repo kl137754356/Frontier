@@ -1,7 +1,10 @@
 import { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
 import rehypeHighlight from 'rehype-highlight';
+import rehypeKatex from 'rehype-katex';
+import 'katex/dist/katex.min.css';
 import type { Message, MessageContent } from '@shared/types';
 
 interface AssistantMessageProps {
@@ -109,7 +112,7 @@ export function AssistantMessage({ message }: AssistantMessageProps) {
           prose-table:my-2 prose-th:px-3 prose-th:py-1.5 prose-th:text-left prose-th:font-semibold prose-th:border-b prose-th:border-gray-300 prose-th:dark:border-gray-600
           prose-td:px-3 prose-td:py-1.5 prose-td:border-b prose-td:border-gray-200 prose-td:dark:border-gray-700
           prose-img:rounded-lg prose-img:my-2">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+          <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeHighlight, rehypeKatex]}>
             {textContent}
           </ReactMarkdown>
         </div>

@@ -2,6 +2,11 @@ import { useState, useRef, useCallback, useEffect, type KeyboardEvent } from 're
 import { useChatStore } from '../store/chat-store';
 import { sendPrompt, sendSlashCommand, sendReset, aguiClient } from '../services/agui-client';
 import { SlashCommandMenu } from './SlashCommandMenu';
+import { AgentSelector } from './AgentSelector';
+import { A2AAgentManager } from './A2AAgentManager';
+import { A2AAgentList } from './A2AAgentList';
+import { HeartbeatManager } from './HeartbeatManager';
+import { HookManager } from './HookManager';
 import type { Message } from '@shared/types';
 
 // Known skill names that can be invoked as bare words
@@ -32,14 +37,29 @@ function isBareWordSkill(text: string): boolean {
 export function InputArea() {
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const isStreaming = useChatStore((s) => s.isStreaming);
+  const connectionStatus = useChatStore((s) => s.connectionStatus);
   const addMessage = useChatStore((s) => s.addMessage);
   const startStreaming = useChatStore((s) => s.startStreaming);
   const sessions = useChatStore((s) => s.sessions);
+  const agents = useChatStore((s) => (s as any).agents) || [];
+  const setActiveAgent = useChatStore((s) => (s as any).setActiveAgent) || (() => {});
+  const refreshAgents = useChatStore((s) => (s as any).refreshAgents) || (() => {});
 
   const [text, setText] = useState('');
   const [showSlashMenu, setShowSlashMenu] = useState(false);
+  const [showAgentMenu, setShowAgentMenu] = useState(false);
+  const [showA2AManager, setShowA2AManager] = useState(false);
+  const [showHeartbeat, setShowHeartbeat] = useState(false);
+  const [showHooks, setShowHooks] = useState(false);
+  const [directA2AAgentId, setDirectA2AAgentId] = useState<string | null>(null);
+  const [directA2AAgentName, setDirectA2AAgentName] = useState<string | null>(null);
   const [skillSuggestions, setSkillSuggestions] = useState<{ label: string; text: string }[] | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Load agents on mount
+  useEffect(() => {
+    refreshAgents();
+  }, [refreshAgents]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -89,7 +109,7 @@ export function InputArea() {
       return;
     }
 
-    // Check for /test-a2ui command — trigger test a2ui rendering
+    // Check for /test-a2ui command to trigger test a2ui rendering
     if (trimmed === '/test-a2ui') {
       startStreaming(activeSessionId);
       // Fetch test endpoint and process as SSE
@@ -148,7 +168,7 @@ export function InputArea() {
 
     // Start streaming and send prompt
     startStreaming(activeSessionId);
-    sendPrompt(trimmed, activeSessionId);
+    sendPrompt(trimmed, activeSessionId, directA2AAgentId);
 
     setText('');
   }, [text, activeSessionId, isStreaming, addMessage, startStreaming]);
@@ -174,9 +194,12 @@ export function InputArea() {
 
   // Token usage display
   const activeSession = sessions.find((s) => s.id === activeSessionId);
+  const activeAgentId = activeSession?.activeAgentId ?? null;
+  const activeAgent = agents.find((a: any) => a.agent_id === activeAgentId) ?? null;
   const tokenUsage = activeSession?.tokenUsage;
 
   return (
+  <>
     <div className="relative shrink-0 border-t border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-4 py-3">
       {/* Slash command menu */}
       {showSlashMenu && (
@@ -206,6 +229,13 @@ export function InputArea() {
       )}
 
       <div className="flex items-end gap-2">
+        {/* Connecting banner */}
+        {connectionStatus !== 'connected' && (
+          <div className="absolute top-0 left-0 right-0 -translate-y-full bg-yellow-50 dark:bg-yellow-900/20 border-b border-yellow-200 dark:border-yellow-800 px-4 py-2 flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-yellow-400 animate-pulse"></span>
+            <span className="text-xs text-yellow-700 dark:text-yellow-300">Connecting to AI engine, please wait...</span>
+          </div>
+        )}
         {/* Text input */}
         <textarea
           ref={textareaRef}
@@ -235,7 +265,7 @@ export function InputArea() {
         ) : (
           <button
             onClick={handleSubmit}
-            disabled={!text.trim()}
+            disabled={!text.trim() || connectionStatus !== 'connected'}
             className="shrink-0 p-2 rounded-lg bg-blue-500 hover:bg-blue-600 disabled:bg-gray-300
               dark:disabled:bg-gray-600 text-white disabled:text-gray-500 dark:disabled:text-gray-400
               transition-colors disabled:cursor-not-allowed"
@@ -250,6 +280,87 @@ export function InputArea() {
 
       {/* Token counter + toolbar */}
       <div className="mt-1.5 flex items-center gap-3">
+        {/* Agent selector button */}
+        <div className="relative">
+          <button
+            onClick={() => setShowAgentMenu((v) => !v)}
+            className={`flex items-center gap-1 text-xs transition-colors ${
+              directA2AAgentId
+                ? 'text-purple-500 dark:text-purple-400 font-medium'
+                : activeAgent
+                ? 'text-blue-500 dark:text-blue-400 font-medium'
+                : 'text-gray-500 dark:text-gray-400 hover:text-blue-500 dark:hover:text-blue-400'
+            }`}
+            title="切换 Agent"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23-.693L5 14.5m14.8.8l1.402 1.402c1 1 .03 2.798-1.364 2.798H4.362c-1.394 0-2.365-1.798-1.364-2.798L4.2 15.3" />
+            </svg>
+            <span>{directA2AAgentName || (activeAgent ? activeAgent.name : 'Agent')}</span>
+          </button>
+
+          {/* Agent popover */}
+          {showAgentMenu && (
+            <div className="absolute bottom-full left-0 mb-2 w-72 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded-xl shadow-xl z-30 p-3 max-h-80 overflow-y-auto">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-semibold text-gray-600 dark:text-gray-300">选择 Agent</span>
+                <button onClick={() => setShowAgentMenu(false)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 text-lg leading-none">&times;</button>
+              </div>
+
+              {/* Default: use claw-code (no direct agent) */}
+              <button
+                onClick={() => { setDirectA2AAgentId(null); setDirectA2AAgentName(null); setShowAgentMenu(false); }}
+                className={`w-full text-left px-2 py-1.5 rounded text-xs mb-1 ${!directA2AAgentId ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400' : 'hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300'}`}
+              >
+                🧠 Frontier (claw-code)
+                {!directA2AAgentId && <span className="ml-1 text-blue-400">✓</span>}
+              </button>
+
+              {/* A2A Direct Agents */}
+              <A2AAgentList
+                selectedId={directA2AAgentId}
+                onSelect={(id, name) => {
+                  setDirectA2AAgentId(id);
+                  setDirectA2AAgentName(name);
+                  setShowAgentMenu(false);
+                }}
+              />
+
+              {/* Manage button */}
+              <button
+                onClick={() => { setShowAgentMenu(false); setShowA2AManager(true); }}
+                className="w-full mt-2 px-2 py-1.5 text-xs text-gray-500 dark:text-gray-400 hover:text-blue-500 border-t border-gray-200 dark:border-gray-700 pt-2"
+              >
+                ⚙ 管理 A2A Agent
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Heartbeat manager button */}
+        <button
+          onClick={() => setShowHeartbeat(true)}
+          className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400 hover:text-red-500 dark:hover:text-red-400 transition-colors"
+          title="心跳任务管理"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
+          </svg>
+          <span>Heartbeat</span>
+        </button>
+
+        {/* Hook manager button */}
+        <button
+          onClick={() => setShowHooks(true)}
+          className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400 hover:text-purple-500 dark:hover:text-purple-400 transition-colors"
+          title="Hook 自动化管理"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+          </svg>
+          <span>Hooks</span>
+        </button>
+
         {/* New chat button */}
         <button
           onClick={() => {
@@ -294,5 +405,15 @@ export function InputArea() {
         )}
       </div>
     </div>
+
+    {/* A2A Agent Manager Modal */}
+    {showA2AManager && <A2AAgentManager onClose={() => setShowA2AManager(false)} />}
+
+    {/* Heartbeat Manager Modal */}
+    {showHeartbeat && <HeartbeatManager onClose={() => setShowHeartbeat(false)} />}
+
+    {/* Hook Manager Modal */}
+    {showHooks && <HookManager onClose={() => setShowHooks(false)} />}
+  </>
   );
 }

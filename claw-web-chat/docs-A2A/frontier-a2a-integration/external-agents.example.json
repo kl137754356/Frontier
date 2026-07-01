@@ -1,0 +1,19 @@
+{
+  "proxyBaseUrl": "http://localhost:8081/api/v1/proxy/agent",
+  "agents": [
+    {
+      "id": "fastgpt-assistant",
+      "type": "openai_compatible",
+      "name": "FastGPT 助手",
+      "description": "回答产品文档相关问题。",
+      "enabled": true
+    },
+    {
+      "id": "dify-workflow",
+      "type": "openai_compatible",
+      "name": "Dify 工作流",
+      "description": "执行 Dify 工作流任务。",
+      "enabled": false
+    }
+  ]
+}

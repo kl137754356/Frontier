@@ -657,7 +657,7 @@ fn hook_payload(
 }
 
 fn parse_tool_input(tool_input: &str) -> Value {
-    serde_json::from_str(tool_input).unwrap_or_else(|_| json!({ "raw": tool_input }))
+    serde_json::from_str(tool_input).unwrap_or_else(|_| if tool_input.trim().is_empty() { serde_json::json!({}) } else { json!({ "raw": tool_input }) })
 }
 
 fn format_invalid_hook_output(

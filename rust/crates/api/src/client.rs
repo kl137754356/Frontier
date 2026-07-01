@@ -79,6 +79,15 @@ impl ProviderClient {
         }
     }
 
+    /// Set dynamic extra headers on the underlying provider client (Anthropic only).
+    /// These headers are injected into every outgoing HTTP request (e.g. X-Session-Id).
+    pub fn set_extra_headers(&self, headers: Vec<(String, String)>) {
+        match self {
+            Self::Anthropic(client) => client.set_extra_headers(headers),
+            Self::Xai(_) | Self::OpenAi(_) => { /* no-op for non-Anthropic providers */ }
+        }
+    }
+
     pub async fn send_message(
         &self,
         request: &MessageRequest,

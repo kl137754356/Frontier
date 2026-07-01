@@ -11,6 +11,7 @@ export default defineConfig({
   },
   server: {
     port: 3000,
+    open: true,
     proxy: {
       '/agent': {
         target: 'http://localhost:8081',
@@ -61,6 +62,26 @@ export default defineConfig({
             proxyRes.headers['x-accel-buffering'] = 'no';
           });
         },
+      },
+      '/auth': {
+        target: 'http://localhost:8081',
+        changeOrigin: true,
+      },
+      '/a2a-agents': {
+        target: 'http://localhost:8081',
+        changeOrigin: true,
+      },
+      '/sessions': {
+        target: 'http://localhost:8081',
+        changeOrigin: true,
+      },
+      '/cancel': {
+        target: 'http://localhost:8081',
+        changeOrigin: true,
+      },
+      '/restart': {
+        target: 'http://localhost:8081',
+        changeOrigin: true,
       },
     },
   },
